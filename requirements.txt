@@ -8,4 +8,5 @@ plotly
 jupyter
 yfinance
 pyyaml
+pyarrow
 pytest

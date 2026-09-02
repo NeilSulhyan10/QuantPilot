@@ -1,0 +1,31 @@
+universe:
+  name: "quantpilot_mvp"
+  description: "Fixed research universe of 20 liquid US equities"
+
+  tickers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - AVGO
+    - GOOGL
+    - AMZN
+    - META
+    - JPM
+    - V
+    - MA
+    - JNJ
+    - UNH
+    - XOM
+    - CVX
+    - PG
+    - KO
+    - COST
+    - CAT
+    - WMT
+    - HD
+
+data:
+  start_date: "2015-01-01"
+  end_date: null
+  interval: "1d"
+  auto_adjust: true

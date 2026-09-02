@@ -1,0 +1,74 @@
+project:
+  name: "QuantPilot"
+  version: "1.0"
+
+universe:
+  name: "quantpilot_mvp"
+  tickers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - AVGO
+    - GOOGL
+    - AMZN
+    - META
+    - JPM
+    - V
+    - MA
+    - JNJ
+    - UNH
+    - XOM
+    - CVX
+    - PG
+    - KO
+    - COST
+    - CAT
+    - WMT
+    - HD
+
+data:
+  start_date: "2015-01-01"
+  end_date: null
+  interval: "1d"
+  auto_adjust: true
+
+returns:
+  method: "simple"
+
+expected_returns:
+  model: "v2"
+  window: 60
+  shrinkage_alpha: 0.5
+
+covariance:
+  window: 60
+
+optimizer:
+  method: "mean_variance"
+  risk_aversion: 10.0
+  max_weight: 0.10
+  long_only: true
+  fully_invested: true
+
+rebalancing:
+  frequency: "monthly"
+
+costs:
+  transaction_cost_bps: 10
+  slippage_bps: 5
+
+backtest:
+  walk_forward: true
+  drift_aware: true
+
+ml:
+  enabled: true
+  model: "ridge"
+  min_train_size: 252
+  horizon: 21
+  alpha: 1.0
+
+benchmarks:
+  equal_weight: true
+  buy_and_hold: true
+  market: "SPY"
