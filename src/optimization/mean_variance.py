@@ -12,6 +12,14 @@ def optimize_mean_variance(
 ) -> pd.Series:
     """
     Solve a long-only, fully-invested mean-variance optimization problem.
+
+    Objective:
+        maximize expected return - risk_aversion * portfolio variance
+
+    Constraints:
+        - Fully invested: sum(weights) == 1
+        - Long-only: weights >= 0
+        - Maximum position size: weights <= max_weight
     """
 
     if expected_returns.ndim != 1:
@@ -20,7 +28,9 @@ def optimize_mean_variance(
     n_assets = len(expected_returns)
 
     if len(tickers) != n_assets:
-        raise ValueError("Number of tickers does not match number of assets.")
+        raise ValueError(
+            "Number of tickers does not match number of assets."
+        )
 
     if covariance.shape != (n_assets, n_assets):
         raise ValueError(
@@ -61,7 +71,13 @@ def optimize_mean_variance(
 
     problem = cp.Problem(objective, constraints)
 
-    problem.solve()
+    problem.solve(
+        solver=cp.CLARABEL,
+        tol_gap_abs=1e-9,
+        tol_gap_rel=1e-9,
+        tol_feas=1e-9,
+        max_iter=500,
+    )
 
     if problem.status not in ["optimal", "optimal_inaccurate"]:
         raise RuntimeError(
@@ -71,8 +87,32 @@ def optimize_mean_variance(
     if weights.value is None:
         raise RuntimeError("Optimizer returned no weights.")
 
-    return pd.Series(
-        np.asarray(weights.value).flatten(),
+    solution = np.asarray(weights.value).flatten()
+
+    result = pd.Series(
+        solution,
         index=tickers,
         name="weight",
     )
+
+    # CVXPY solvers operate with finite numerical tolerances.
+    # Therefore, allow very small deviations from the hard constraints.
+    tolerance = 1e-5
+
+    if not np.isclose(result.sum(), 1.0, atol=tolerance):
+        raise RuntimeError(
+            f"Optimizer returned weights summing to "
+            f"{result.sum():.10f}."
+        )
+
+    if result.min() < -tolerance:
+        raise RuntimeError(
+            "Optimizer returned materially negative portfolio weights."
+        )
+
+    if result.max() > max_weight + tolerance:
+        raise RuntimeError(
+            "Optimizer returned a materially oversized position."
+        )
+
+    return result

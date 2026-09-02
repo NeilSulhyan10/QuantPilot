@@ -10,3 +10,4 @@ yfinance
 pyyaml
 pyarrow
 pytest
+streamlit
