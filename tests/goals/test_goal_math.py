@@ -5,6 +5,7 @@ from src.goals.goal_math import (
     calculate_required_cagr,
     calculate_required_initial_investment,
     calculate_required_monthly_contribution,
+    calculate_required_return,	
 )
 
 
@@ -88,3 +89,34 @@ def test_required_monthly_contribution():
 def test_invalid_inputs(function, args):
     with pytest.raises(ValueError):
         function(*args)
+def test_required_return_with_initial_and_monthly_contribution():
+    required_return = calculate_required_return(
+        future_value=1_000_000,
+        initial_investment=100_000,
+        monthly_contribution=2_000,
+        years=10,
+    )
+
+    assert required_return > 0
+    assert required_return < 1.0
+
+
+def test_required_return_zero_when_contributions_already_reach_goal():
+    required_return = calculate_required_return(
+        future_value=120_000,
+        initial_investment=0,
+        monthly_contribution=1_000,
+        years=10,
+    )
+
+    assert required_return == 0.0
+
+
+def test_required_return_rejects_zero_investment():
+    with pytest.raises(ValueError):
+        calculate_required_return(
+            future_value=1_000_000,
+            initial_investment=0,
+            monthly_contribution=0,
+            years=10,
+        )
