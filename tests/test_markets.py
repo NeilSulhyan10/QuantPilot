@@ -45,6 +45,8 @@ def test_india_ticker_normalization():
     assert normalize_ticker("reliance", Market.INDIA) == "RELIANCE.NS"
     assert normalize_ticker("RELIANCE.NS", Market.INDIA) == "RELIANCE.NS"
 
+def test_india_benchmark_normalization():
+    assert normalize_ticker("^NSEI", Market.INDIA) == "^NSEI"
 
 def test_empty_ticker():
     with pytest.raises(ValueError, match="Ticker must not be empty"):

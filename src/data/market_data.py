@@ -95,7 +95,7 @@ class MarketDataAdapter:
                 end_date=end_date,
             )
 
-            data = self._clean_downloaded_data(data)
+            data = self._clean_downloaded_data(data, ticker=ticker,)
 
         else:
             raise FileNotFoundError(
@@ -216,7 +216,7 @@ class MarketDataAdapter:
             kwargs["end"] = end_date
 
         if start_date is None and end_date is None:
-            kwargs["period"] = "max"
+            kwargs["period"] = "10y"
 
         data = yf.download(
             ticker,
@@ -249,34 +249,43 @@ class MarketDataAdapter:
     @staticmethod
     def _clean_downloaded_data(
         data: pd.DataFrame,
+        ticker: str = "unknown",
     ) -> pd.DataFrame:
         """
-        Conservatively clean newly downloaded provider data.
+        Clean Yahoo Finance data conservatively.
 
-        Price values are never modified. Invalid rows are removed.
+        Provider rows containing missing values are discarded first.
+        Structurally invalid OHLC rows are then identified and removed.
+        Price values are never modified.
+
+        The remaining data is passed through QuantPilot's strict
+        validation layer.
         """
+
         if data is None or data.empty:
             raise ValueError(
-                "No valid data available."
+                f"No valid data available for ticker: {ticker}"
             )
 
-        data = normalize_columns(data)
+        data = normalize_columns(data.copy())
+
+        required = MarketDataAdapter.REQUIRED_COLUMNS
 
         missing = [
             column
-            for column in MarketDataAdapter.REQUIRED_COLUMNS
+            for column in required
             if column not in data.columns
         ]
 
         if missing:
             raise ValueError(
-                f"Data is missing required columns: {missing}"
+                f"Downloaded data for {ticker} is missing "
+                f"required columns: {missing}"
             )
 
-        data = data[
-            MarketDataAdapter.REQUIRED_COLUMNS
-        ].copy()
+        data = data[required].copy()
 
+        # Normalize index
         data.index = pd.to_datetime(data.index)
 
         if data.index.tz is not None:
@@ -284,21 +293,29 @@ class MarketDataAdapter:
 
         data = data.sort_index()
 
-        # Remove rows with missing OHLCV values.
-        data = data[
-            data["Open"].notna()
-            & data["High"].notna()
-            & data["Low"].notna()
-            & data["Close"].notna()
-            & data["Volume"].notna()
-        ]
+        if data.empty:
+            raise ValueError(
+                f"No data available for ticker: {ticker}"
+            )
+
+        # ---------------------------------------------------------
+        # 1. Remove rows containing missing provider values
+        # ---------------------------------------------------------
+
+        complete_mask = data.notna().all(axis=1)
+
+        data = data.loc[complete_mask].copy()
 
         if data.empty:
             raise ValueError(
-                "No valid data available."
+                f"No complete OHLCV rows available for ticker: {ticker}"
             )
 
-        valid = (
+        # ---------------------------------------------------------
+        # 2. Identify malformed OHLC rows
+        # ---------------------------------------------------------
+
+        valid_mask = (
             (data["Open"] > 0)
             & (data["High"] > 0)
             & (data["Low"] > 0)
@@ -311,25 +328,44 @@ class MarketDataAdapter:
             & (data["Close"] <= data["High"])
         )
 
-        invalid_count = int((~valid).sum())
-        original_rows = len(data)
+        malformed_count = int((~valid_mask).sum())
+        total_complete_rows = len(data)
 
-        if invalid_count:
-            invalid_fraction = (
-                invalid_count / original_rows
+        # ---------------------------------------------------------
+        # 3. Reject genuinely corrupted downloads
+        # ---------------------------------------------------------
+
+        malformed_fraction = (
+            malformed_count / total_complete_rows
+            if total_complete_rows > 0
+            else 1.0
+        )
+
+        if malformed_fraction > MAX_INVALID_ROW_FRACTION:
+            raise ValueError(
+                f"More than 1% of downloaded data rows are malformed "
+                f"for {ticker}: "
+                f"{malformed_count:,}/{total_complete_rows:,} "
+                f"({malformed_fraction:.2%})."
             )
 
-            if invalid_fraction > MAX_INVALID_ROW_FRACTION:
-                raise ValueError(
-                    "More than 1% of downloaded data rows "
-                    "are malformed."
-                )
+        # ---------------------------------------------------------
+        # 4. Remove the small number of malformed rows
+        # ---------------------------------------------------------
 
-            data = data.loc[valid].copy()
+        if malformed_count:
+            data = data.loc[valid_mask].copy()
 
         if data.empty:
             raise ValueError(
-                "No valid data available."
+                f"All downloaded rows for ticker {ticker} "
+                f"failed OHLC validation."
             )
 
-        return data
+        # ---------------------------------------------------------
+        # 5. Final strict QuantPilot validation
+        # ---------------------------------------------------------
+
+        data = validate_data(data)
+
+        return data[required].sort_index()

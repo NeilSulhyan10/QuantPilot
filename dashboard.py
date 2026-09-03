@@ -3,372 +3,332 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-
-# =========================================================
-# Paths
-# =========================================================
+from src.data.markets import Market, get_market_config
+from src.goals.assets import (
+    build_selected_return_matrix,
+    load_selected_assets,
+    validate_minimum_history,
+)
+from src.goals.feasibility import (
+    calculate_maximum_feasible_return,
+    calculate_recommended_target_return,
+)
+from src.goals.goal_math import (
+    calculate_required_initial_investment,
+    calculate_required_monthly_contribution,
+)
+from src.goals.planner import build_goal_plan_from_selection
+from src.goals.backtest import backtest_goal_portfolio
+from src.backtesting.benchmark import EqualWeightBacktester
+from src.backtesting.config import BacktestConfig
+from src.evaluation.metrics import evaluate_returns
+from src.data.market_data import MarketDataAdapter
+from src.goals.scenarios import build_scenario_set
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-
 RESULTS_DIR = PROJECT_ROOT / "results"
 BACKTESTS_DIR = RESULTS_DIR / "backtests"
 COMPARISONS_DIR = RESULTS_DIR / "comparisons"
 
 
-# =========================================================
-# Page configuration
-# =========================================================
-
 st.set_page_config(
     page_title="QuantPilot",
-    page_icon="◈",
+    page_icon="Q",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
 
-# =========================================================
-# Premium QuantPilot visual system
-# =========================================================
-
 st.markdown(
     """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 
-    :root {
-        --qp-bg: #080b12;
-        --qp-panel: #0e131d;
-        --qp-panel-2: #111824;
-        --qp-border: rgba(255,255,255,.08);
-        --qp-text: #f4f7fb;
-        --qp-muted: #8d98aa;
-        --qp-accent: #7c9cff;
-        --qp-accent-2: #5eead4;
-        --qp-green: #5eead4;
-        --qp-red: #ff7b8a;
-        --qp-glow: rgba(124,156,255,.16);
-    }
+:root {
+    --bg: #070a0f;
+    --panel: #0d1219;
+    --panel2: #111821;
+    --border: rgba(255,255,255,.08);
+    --text: #f2f5f7;
+    --muted: #8e99a8;
+    --green: #22c55e;
+    --green2: #16a34a;
+    --green-soft: rgba(34,197,94,.09);
+    --red: #ef6b73;
+    --amber: #eab308;
+}
 
-    .stApp {
-        background:
-            radial-gradient(circle at 80% 0%, rgba(124,156,255,.08), transparent 30%),
-            radial-gradient(circle at 10% 20%, rgba(94,234,212,.045), transparent 25%),
-            var(--qp-bg);
-        color: var(--qp-text);
-        font-family: "DM Sans", sans-serif;
-    }
+.stApp {
+    background:
+        radial-gradient(circle at 85% 0%, rgba(34,197,94,.055), transparent 28%),
+        radial-gradient(circle at 5% 15%, rgba(34,197,94,.035), transparent 24%),
+        var(--bg);
+    color: var(--text);
+    font-family: "DM Sans", sans-serif;
+}
 
-    [data-testid="stHeader"] {
-        background: transparent;
-    }
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stToolbar"] { visibility: hidden; }
 
-    [data-testid="stToolbar"] {
-        visibility: hidden;
-    }
+.block-container {
+    max-width: 1500px;
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+}
 
-    .block-container {
-        max-width: 1500px;
-        padding-top: 2.2rem;
-        padding-bottom: 3rem;
-    }
+h1,h2,h3,h4 {
+    font-family: "Space Grotesk", sans-serif !important;
+    color: var(--text) !important;
+    letter-spacing: -.025em;
+}
 
-    h1, h2, h3, h4 {
-        font-family: "Space Grotesk", sans-serif !important;
-        letter-spacing: -.025em;
-        color: var(--qp-text) !important;
-    }
+h1 { font-size: 2.65rem !important; }
+h2 { font-size: 1.55rem !important; margin-top: 1.7rem !important; }
+h3 { font-size: 1.1rem !important; }
 
-    h1 {
-        font-size: 2.7rem !important;
-        margin-bottom: .15rem !important;
-    }
+p,li,label,.stCaption { color: var(--muted); }
 
-    h2 {
-        font-size: 1.55rem !important;
-        margin-top: 1.7rem !important;
-    }
+.qp-brand {
+    display:flex;
+    align-items:center;
+    gap:14px;
+}
 
-    h3 {
-        font-size: 1.12rem !important;
-    }
+.qp-mark {
+    width:42px;
+    height:42px;
+    border-radius:11px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:var(--green);
+    color:#041008;
+    font-family:"Space Grotesk",sans-serif;
+    font-size:22px;
+    font-weight:700;
+    box-shadow:0 0 28px rgba(34,197,94,.16);
+}
 
-    p, li, label, .stCaption {
-        color: var(--qp-muted);
-    }
+.qp-wordmark {
+    font-family:"Space Grotesk",sans-serif;
+    font-size:27px;
+    font-weight:700;
+    color:var(--text);
+}
 
-    .qp-brand {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        margin-bottom: 4px;
-    }
+.qp-subtitle {
+    color:var(--muted);
+    font-size:13px;
+}
 
-    .qp-mark {
-        width: 42px;
-        height: 42px;
-        border-radius: 12px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: linear-gradient(135deg, #7c9cff, #5eead4);
-        color: #071018;
-        font-family: "Space Grotesk", sans-serif;
-        font-size: 22px;
-        font-weight: 700;
-        box-shadow: 0 0 28px rgba(124,156,255,.20);
-    }
+.qp-hero {
+    margin:27px 0 24px;
+    padding:28px 30px;
+    border:1px solid var(--border);
+    border-radius:20px;
+    background:
+        linear-gradient(135deg,rgba(34,197,94,.075),rgba(17,24,33,.75)),
+        var(--panel);
+    box-shadow:0 18px 60px rgba(0,0,0,.20);
+}
 
-    .qp-wordmark {
-        font-family: "Space Grotesk", sans-serif;
-        font-size: 27px;
-        font-weight: 700;
-        color: var(--qp-text);
-    }
+.qp-eyebrow {
+    color:#4ade80;
+    text-transform:uppercase;
+    letter-spacing:.14em;
+    font-size:11px;
+    font-weight:700;
+    margin-bottom:7px;
+}
 
-    .qp-subtitle {
-        color: var(--qp-muted);
-        font-size: 13px;
-        margin-top: -2px;
-    }
+.qp-hero-title {
+    font-family:"Space Grotesk",sans-serif;
+    font-size:30px;
+    font-weight:700;
+    color:var(--text);
+    margin-bottom:7px;
+}
 
-    .qp-hero {
-        margin: 28px 0 24px 0;
-        padding: 28px 30px;
-        border: 1px solid var(--qp-border);
-        border-radius: 20px;
-        background:
-            linear-gradient(135deg, rgba(124,156,255,.10), rgba(94,234,212,.035)),
-            rgba(14,19,29,.88);
-        box-shadow: 0 18px 60px rgba(0,0,0,.22);
-    }
+.qp-hero-copy {
+    max-width:900px;
+    color:var(--muted);
+    line-height:1.65;
+}
 
-    .qp-hero-title {
-        font-family: "Space Grotesk", sans-serif;
-        font-size: 30px;
-        font-weight: 700;
-        color: var(--qp-text);
-        margin-bottom: 7px;
-    }
+.qp-section {
+    margin-top:30px;
+    margin-bottom:13px;
+}
 
-    .qp-hero-copy {
-        max-width: 850px;
-        color: var(--qp-muted);
-        line-height: 1.65;
-    }
+.qp-section-title {
+    font-family:"Space Grotesk",sans-serif;
+    color:var(--text);
+    font-size:20px;
+    font-weight:700;
+}
 
-    .qp-eyebrow {
-        color: var(--qp-accent-2);
-        text-transform: uppercase;
-        letter-spacing: .13em;
-        font-size: 11px;
-        font-weight: 700;
-        margin-bottom: 7px;
-    }
+.qp-section-copy {
+    color:var(--muted);
+    font-size:13px;
+    margin-top:3px;
+}
 
-    .qp-card {
-        border: 1px solid var(--qp-border);
-        border-radius: 16px;
-        padding: 19px 20px;
-        background: linear-gradient(180deg, rgba(17,24,36,.96), rgba(14,19,29,.96));
-        min-height: 108px;
-        box-shadow: 0 10px 35px rgba(0,0,0,.14);
-    }
+.qp-card {
+    border:1px solid var(--border);
+    border-radius:16px;
+    padding:19px 20px;
+    background:linear-gradient(180deg,rgba(17,24,33,.97),rgba(13,18,25,.97));
+    min-height:108px;
+}
 
-    .qp-card-label {
-        color: var(--qp-muted);
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: .08em;
-        font-weight: 600;
-        margin-bottom: 9px;
-    }
+.qp-card-label {
+    color:var(--muted);
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    font-weight:600;
+}
 
-    .qp-card-value {
-        color: var(--qp-text);
-        font-family: "Space Grotesk", sans-serif;
-        font-size: 25px;
-        font-weight: 700;
-    }
+.qp-card-value {
+    color:var(--text);
+    font-family:"Space Grotesk",sans-serif;
+    font-size:25px;
+    font-weight:700;
+    margin-top:8px;
+}
 
-    .qp-card-note {
-        color: var(--qp-muted);
-        font-size: 12px;
-        margin-top: 6px;
-    }
+.qp-card-note {
+    color:var(--muted);
+    font-size:12px;
+    margin-top:6px;
+}
 
-    .qp-section {
-        margin-top: 30px;
-        margin-bottom: 13px;
-    }
+.qp-chip {
+    display:inline-block;
+    padding:6px 10px;
+    border:1px solid rgba(34,197,94,.24);
+    border-radius:999px;
+    background:var(--green-soft);
+    color:#86efac;
+    font-size:11px;
+    margin:3px 5px 3px 0;
+}
 
-    .qp-section-title {
-        font-family: "Space Grotesk", sans-serif;
-        color: var(--qp-text);
-        font-size: 20px;
-        font-weight: 700;
-    }
+.qp-highlight,.qp-success,.qp-warning {
+    border-left:3px solid var(--green);
+    padding:13px 16px;
+    border-radius:0 10px 10px 0;
+    background:var(--green-soft);
+    color:var(--muted);
+    font-size:13px;
+    line-height:1.55;
+}
 
-    .qp-section-copy {
-        color: var(--qp-muted);
-        font-size: 13px;
-        margin-top: 3px;
-    }
+.qp-warning {
+    border-left-color:var(--amber);
+    background:rgba(234,179,8,.055);
+}
 
-    .qp-chip {
-        display: inline-block;
-        padding: 6px 10px;
-        border: 1px solid var(--qp-border);
-        border-radius: 999px;
-        background: rgba(255,255,255,.035);
-        color: var(--qp-muted);
-        font-size: 11px;
-        margin: 3px 5px 3px 0;
-    }
+.qp-scenario {
+    border:1px solid var(--border);
+    border-radius:16px;
+    padding:18px;
+    background:var(--panel);
+    min-height:185px;
+}
 
-    .qp-highlight {
-        border-left: 3px solid var(--qp-accent);
-        padding: 13px 16px;
-        border-radius: 0 10px 10px 0;
-        background: rgba(124,156,255,.07);
-        color: var(--qp-muted);
-        font-size: 13px;
-        line-height: 1.55;
-    }
+.qp-scenario-name {
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    color:var(--muted);
+    font-weight:700;
+}
 
-    .qp-success {
-        border-left: 3px solid var(--qp-green);
-        padding: 13px 16px;
-        border-radius: 0 10px 10px 0;
-        background: rgba(94,234,212,.06);
-        color: var(--qp-muted);
-        font-size: 13px;
-    }
+.qp-scenario-return {
+    font-family:"Space Grotesk",sans-serif;
+    font-size:27px;
+    font-weight:700;
+    color:var(--text);
+    margin:8px 0 14px;
+}
 
-    .qp-warning {
-        border-left: 3px solid #fbbf24;
-        padding: 13px 16px;
-        border-radius: 0 10px 10px 0;
-        background: rgba(251,191,36,.055);
-        color: var(--qp-muted);
-        font-size: 13px;
-        line-height: 1.55;
-    }
+.qp-scenario-line {
+    display:flex;
+    justify-content:space-between;
+    padding:7px 0;
+    border-top:1px solid var(--border);
+    font-size:12px;
+}
 
-    .qp-scenario {
-        border: 1px solid var(--qp-border);
-        border-radius: 16px;
-        padding: 18px;
-        background: var(--qp-panel);
-        min-height: 185px;
-    }
+.qp-scenario-line span:first-child { color:var(--muted); }
+.qp-scenario-line span:last-child { color:var(--text); font-weight:600; }
 
-    .qp-scenario-name {
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: .08em;
-        color: var(--qp-muted);
-        font-weight: 700;
-    }
+.qp-footer {
+    margin-top:40px;
+    padding-top:18px;
+    border-top:1px solid var(--border);
+    color:#667180;
+    font-size:11px;
+    text-align:center;
+}
 
-    .qp-scenario-return {
-        font-family: "Space Grotesk", sans-serif;
-        font-size: 27px;
-        font-weight: 700;
-        color: var(--qp-text);
-        margin: 8px 0 14px;
-    }
+div[data-testid="stMetric"] {
+    background:linear-gradient(180deg,rgba(17,24,33,.97),rgba(13,18,25,.97));
+    border:1px solid var(--border);
+    border-radius:16px;
+    padding:17px 18px;
+}
 
-    .qp-scenario-line {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 7px 0;
-        border-top: 1px solid var(--qp-border);
-        font-size: 12px;
-    }
+div[data-testid="stMetricLabel"] { color:var(--muted) !important; }
+div[data-testid="stMetricValue"] {
+    color:var(--text) !important;
+    font-family:"Space Grotesk",sans-serif;
+}
 
-    .qp-scenario-line span:first-child {
-        color: var(--qp-muted);
-    }
+.stButton > button {
+    border-radius:10px;
+    border:1px solid rgba(34,197,94,.55);
+    background:linear-gradient(180deg,var(--green),var(--green2));
+    color:#031108;
+    font-weight:700;
+    min-height:44px;
+    box-shadow:0 8px 24px rgba(34,197,94,.12);
+}
 
-    .qp-scenario-line span:last-child {
-        color: var(--qp-text);
-        font-weight: 600;
-    }
+.stButton > button:hover {
+    border-color:#4ade80;
+    background:linear-gradient(180deg,#4ade80,var(--green));
+    color:#031108;
+}
 
-    .qp-footer {
-        margin-top: 40px;
-        padding-top: 18px;
-        border-top: 1px solid var(--qp-border);
-        color: #697386;
-        font-size: 11px;
-        text-align: center;
-    }
+.stButton > button:disabled {
+    background:#1b2420;
+    border-color:#29352e;
+    color:#66716a;
+}
 
-    div[data-testid="stMetric"] {
-        background: linear-gradient(180deg, rgba(17,24,36,.96), rgba(14,19,29,.96));
-        border: 1px solid var(--qp-border);
-        border-radius: 16px;
-        padding: 17px 18px;
-        box-shadow: 0 10px 35px rgba(0,0,0,.14);
-    }
+.stTextInput input,.stNumberInput input,.stSelectbox div,
+.stMultiSelect div[data-baseweb="select"] {
+    border-radius:10px !important;
+}
 
-    div[data-testid="stMetricLabel"] {
-        color: var(--qp-muted) !important;
-    }
+[data-testid="stDataFrame"] {
+    border:1px solid var(--border);
+    border-radius:14px;
+    overflow:hidden;
+}
 
-    div[data-testid="stMetricValue"] {
-        color: var(--qp-text) !important;
-        font-family: "Space Grotesk", sans-serif;
-    }
-
-    .stButton > button {
-        border-radius: 11px;
-        border: 1px solid rgba(124,156,255,.35);
-        background: linear-gradient(135deg, rgba(124,156,255,.22), rgba(94,234,212,.12));
-        color: white;
-        font-weight: 700;
-        min-height: 44px;
-        box-shadow: 0 8px 25px rgba(0,0,0,.15);
-    }
-
-    .stButton > button:hover {
-        border-color: rgba(124,156,255,.75);
-        color: white;
-        transform: translateY(-1px);
-    }
-
-    .stTextInput input, .stNumberInput input, .stSelectbox div,
-    .stMultiSelect div[data-baseweb="select"] {
-        border-radius: 10px !important;
-    }
-
-    [data-testid="stDataFrame"] {
-        border: 1px solid var(--qp-border);
-        border-radius: 14px;
-        overflow: hidden;
-    }
-
-    hr {
-        border-color: var(--qp-border) !important;
-    }
-
-    .stAlert {
-        border-radius: 12px;
-    }
+hr { border-color:var(--border) !important; }
+.stAlert { border-radius:12px; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-# =========================================================
-# Data loading
-# =========================================================
-
 @st.cache_data
-def load_comparison() -> pd.DataFrame:
+def load_comparison():
     path = COMPARISONS_DIR / "strategy_comparison.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing results file: {path}")
@@ -376,7 +336,7 @@ def load_comparison() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_returns() -> pd.DataFrame:
+def load_returns():
     path = BACKTESTS_DIR / "quantpilot_v2_returns.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing results file: {path}")
@@ -384,7 +344,7 @@ def load_returns() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_weights() -> pd.DataFrame:
+def load_weights():
     path = BACKTESTS_DIR / "quantpilot_v2_weights.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing results file: {path}")
@@ -392,7 +352,7 @@ def load_weights() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_turnover() -> pd.DataFrame:
+def load_turnover():
     path = BACKTESTS_DIR / "quantpilot_v2_turnover.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing results file: {path}")
@@ -400,7 +360,7 @@ def load_turnover() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_average_weights() -> pd.DataFrame:
+def load_average_weights():
     path = BACKTESTS_DIR / "quantpilot_v2_average_weights.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing results file: {path}")
@@ -408,39 +368,36 @@ def load_average_weights() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_effective_stocks() -> pd.DataFrame:
+def load_effective_stocks():
     path = BACKTESTS_DIR / "quantpilot_v2_effective_stocks.csv"
     if not path.exists():
         raise FileNotFoundError(f"Missing results file: {path}")
     return pd.read_csv(path, parse_dates=["date"]).set_index("date")
 
 
-# =========================================================
-# Reusable UI helpers
-# =========================================================
-
-def section(title: str, copy: str | None = None):
-    text = f'<div class="qp-section"><div class="qp-section-title">{title}</div>'
+def section(title, copy=None):
+    html = f'<div class="qp-section"><div class="qp-section-title">{title}</div>'
     if copy:
-        text += f'<div class="qp-section-copy">{copy}</div>'
-    text += "</div>"
-    st.markdown(text, unsafe_allow_html=True)
+        html += f'<div class="qp-section-copy">{copy}</div>'
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
 
 
-def card(label: str, value: str, note: str = ""):
+def card(label, value, note=""):
+    note_html = f'<div class="qp-card-note">{note}</div>' if note else ""
     st.markdown(
         f"""
         <div class="qp-card">
             <div class="qp-card-label">{label}</div>
             <div class="qp-card-value">{value}</div>
-            {"<div class='qp-card-note'>" + note + "</div>" if note else ""}
+            {note_html}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def scenario_card(name: str, annual_return: float, initial: float, monthly: float):
+def scenario_card(name, annual_return, initial, monthly, currency_symbol="$"):
     st.markdown(
         f"""
         <div class="qp-scenario">
@@ -448,32 +405,17 @@ def scenario_card(name: str, annual_return: float, initial: float, monthly: floa
             <div class="qp-scenario-return">{annual_return:.2%}</div>
             <div class="qp-scenario-line">
                 <span>Initial investment</span>
-                <span>${initial:,.0f}</span>
+                <span>{currency_symbol}{initial:,.0f}</span>
             </div>
             <div class="qp-scenario-line">
                 <span>Monthly contribution</span>
-                <span>${monthly:,.0f}</span>
+                <span>{currency_symbol}{monthly:,.0f}</span>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-
-def format_metric(metric_name: str, value: float) -> str:
-    if metric_name in {
-        "cagr",
-        "annualized_volatility",
-        "maximum_drawdown",
-        "cumulative_return",
-    }:
-        return f"{value:.2%}"
-    return f"{value:.2f}"
-
-
-# =========================================================
-# Header
-# =========================================================
 
 st.markdown(
     """
@@ -489,10 +431,6 @@ st.markdown(
 )
 
 
-# =========================================================
-# Application mode
-# =========================================================
-
 mode = st.radio(
     "Mode",
     ["Research Mode", "Goal Planner"],
@@ -500,7 +438,8 @@ mode = st.radio(
     label_visibility="collapsed",
 )
 
-if mode == "Research Mode": 
+
+if mode == "Research Mode":
 
     st.markdown(
         """
@@ -510,7 +449,7 @@ if mode == "Research Mode":
             <div class="qp-hero-copy">
                 Walk-forward quantitative research using rolling expected returns,
                 covariance estimation, constrained mean-variance optimization,
-                realistic portfolio turnover, transaction costs and benchmark analysis.
+                realistic turnover, transaction costs and benchmark analysis.
             </div>
         </div>
         """,
@@ -533,16 +472,19 @@ if mode == "Research Mode":
     section("QuantPilot V2", "Core out-of-sample performance")
 
     cols = st.columns(5)
-    with cols[0]:
-        card("CAGR", f"{qp['cagr']:.2%}")
-    with cols[1]:
-        card("Sharpe", f"{qp['sharpe_ratio']:.2f}")
-    with cols[2]:
-        card("Volatility", f"{qp['annualized_volatility']:.2%}")
-    with cols[3]:
-        card("Max Drawdown", f"{qp['maximum_drawdown']:.2%}")
-    with cols[4]:
-        card("Cumulative Return", f"{qp['cumulative_return']:.2%}")
+    for col, label, value in zip(
+        cols,
+        ["CAGR", "Sharpe", "Volatility", "Max Drawdown", "Cumulative Return"],
+        [
+            f"{qp['cagr']:.2%}",
+            f"{qp['sharpe_ratio']:.2f}",
+            f"{qp['annualized_volatility']:.2%}",
+            f"{qp['maximum_drawdown']:.2%}",
+            f"{qp['cumulative_return']:.2%}",
+        ],
+    ):
+        with col:
+            card(label, value)
 
     section("Performance Comparison", "Risk-adjusted comparison across the research universe")
 
@@ -556,7 +498,6 @@ if mode == "Research Mode":
             "maximum_drawdown",
         ]
     ].copy()
-
     display.columns = [
         "Cumulative Return",
         "CAGR",
@@ -582,12 +523,11 @@ if mode == "Research Mode":
     )
 
     section("Cumulative Portfolio Growth")
-    cumulative = (1.0 + returns["return"]).cumprod()
-    st.line_chart(cumulative, height=400)
+    st.line_chart((1.0 + returns["return"]).cumprod(), height=400)
 
     section("QuantPilot Drawdown")
-    drawdown = cumulative / cumulative.cummax() - 1.0
-    st.area_chart(drawdown, height=300)
+    cumulative = (1.0 + returns["return"]).cumprod()
+    st.area_chart(cumulative / cumulative.cummax() - 1.0, height=300)
 
     section("Portfolio Allocation", "Current and average capital allocation")
 
@@ -595,20 +535,17 @@ if mode == "Research Mode":
 
     with col1:
         st.markdown("**Latest Weights**")
-        latest_weights = weights.iloc[-1].sort_values(ascending=False)
-        latest_display = latest_weights[latest_weights > 1e-8].to_frame("Weight")
+        latest = weights.iloc[-1].sort_values(ascending=False)
         st.dataframe(
-            latest_display.style.format({"Weight": "{:.2%}"}),
+            latest[latest > 1e-8].to_frame("Weight").style.format({"Weight": "{:.2%}"}),
             use_container_width=True,
         )
 
     with col2:
         st.markdown("**Average Weights**")
-        average_display = average_weights.sort_values(
-            "average_weight", ascending=False
-        ).copy()
+        avg = average_weights.sort_values("average_weight", ascending=False)
         st.dataframe(
-            average_display.style.format({"average_weight": "{:.2%}"}),
+            avg.style.format({"average_weight": "{:.2%}"}),
             use_container_width=True,
         )
 
@@ -616,15 +553,9 @@ if mode == "Research Mode":
 
     cols = st.columns(3)
     with cols[0]:
-        card(
-            "Average Active Positions",
-            f"{(weights.abs() > 1e-8).sum(axis=1).mean():.2f}",
-        )
+        card("Average Active Positions", f"{(weights.abs() > 1e-8).sum(axis=1).mean():.2f}")
     with cols[1]:
-        card(
-            "Average Effective Stocks",
-            f"{effective_stocks.iloc[:, 0].mean():.2f}",
-        )
+        card("Average Effective Stocks", f"{effective_stocks.iloc[:, 0].mean():.2f}")
     with cols[2]:
         card("Maximum Position", f"{weights.max().max():.2%}")
 
@@ -632,7 +563,6 @@ if mode == "Research Mode":
     st.line_chart(turnover["turnover"], height=300)
 
     section("Methodology")
-
     st.markdown(
         """
         <div class="qp-highlight">
@@ -653,71 +583,40 @@ if mode == "Research Mode":
     )
 
     section("Research Limitations")
-
     st.markdown(
         """
         <div class="qp-warning">
-        • The MVP uses a fixed current-stock universe, creating potential survivorship bias.<br>
-        • Historical estimates are based on daily market data.<br>
-        • Transaction costs and slippage are modeled assumptions, not live execution measurements.<br>
-        • Backtest results are historical and do not guarantee future performance.<br>
-        • QuantPilot is not selected solely because it has the highest historical return.
+        The MVP uses a fixed current-stock universe, creating potential survivorship bias.<br>
+        Historical estimates are based on daily market data.<br>
+        Transaction costs and slippage are modeled assumptions, not live execution measurements.<br>
+        Backtest results are historical and do not guarantee future performance.<br>
+        QuantPilot is not selected solely because it has the highest historical return.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     st.markdown(
-        '<div class="qp-footer">QuantPilot v1.0 · Research Mode</div>',
+        '<div class="qp-footer">QuantPilot · Research Mode</div>',
         unsafe_allow_html=True,
     )
 
 
 else:
-
-    # =====================================================
-    # Goal Planner
-    # =====================================================
-
-    from src.goals.feasibility import (
-        calculate_maximum_feasible_return,
-        calculate_recommended_target_return,
-    )
-    from src.goals.goal_math import (
-        calculate_required_initial_investment,
-        calculate_required_monthly_contribution,
-    )
-    from src.goals.portfolio import build_goal_portfolio
-    from src.goals.scenarios import build_scenario_set
-    from src.goals.backtest import backtest_goal_portfolio
-    from src.goals.assets import (
-        build_selected_return_matrix,
-        load_selected_assets,
-        validate_minimum_history,
-    )
-    from src.data.benchmark_reader import load_benchmark
-    from src.backtesting.benchmark import EqualWeightBacktester
-    from src.backtesting.config import BacktestConfig
-    from src.evaluation.metrics import evaluate_returns
-
     st.markdown(
         """
         <div class="qp-hero">
             <div class="qp-eyebrow">Goal Planner</div>
             <div class="qp-hero-title">Turn a future target into a portfolio plan.</div>
             <div class="qp-hero-copy">
-                Set a target, choose your horizon and risk tolerance, select the
-                companies you want QuantPilot to consider, and let the optimizer
-                translate those constraints into a model-based funding plan.
+                Choose a market, select the companies you want QuantPilot to consider,
+                define your target and horizon, and generate a constrained portfolio plan.
+                Market-specific ticker rules and benchmarks are handled automatically.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    # -----------------------------------------------------
-    # Inputs
-    # -----------------------------------------------------
 
     section("01 · Define Your Goal", "The destination QuantPilot is planning toward")
 
@@ -741,7 +640,30 @@ else:
             step=1,
         )
 
-    section("02 · Choose Risk", "Your risk tolerance determines the portfolio volatility constraint")
+    section("02 · Choose Market", "Market selection determines ticker conventions, currency and benchmark")
+
+    market_label = st.selectbox(
+        "Market",
+        ["United States", "India"],
+    )
+
+    market = (
+        Market.US
+        if market_label == "United States"
+        else Market.INDIA
+    )
+    market_config = get_market_config(market)
+
+    currency_symbol = "$" if market_config.currency == "USD" else "₹"
+
+    st.markdown(
+        f'<span class="qp-chip">{market_config.name}</span>'
+        f'<span class="qp-chip">{market_config.currency}</span>'
+        f'<span class="qp-chip">Benchmark: {market_config.benchmark}</span>',
+        unsafe_allow_html=True,
+    )
+
+    section("03 · Choose Risk", "Your risk tolerance determines the portfolio volatility constraint")
 
     risk_tolerance = st.selectbox(
         "Risk profile",
@@ -758,25 +680,39 @@ else:
 
     st.markdown(
         f'<div class="qp-chip">{risk_tolerance}</div>'
-        f'<span style="color:#8d98aa;font-size:13px;">{risk_descriptions[risk_tolerance]}</span>',
+        f'<span style="color:#8e99a8;font-size:13px;">{risk_descriptions[risk_tolerance]}</span>',
         unsafe_allow_html=True,
     )
 
-    section("03 · Select Companies", "QuantPilot will optimize only across your selected universe")
+    section("04 · Select Companies", "Enter the companies you want QuantPilot to consider")
 
-    available_tickers = [
-        "AAPL", "MSFT", "NVDA", "AVGO", "GOOGL",
-        "AMZN", "META", "JPM", "V", "MA",
-        "JNJ", "UNH", "XOM", "CVX", "PG",
-        "KO", "COST", "CAT", "WMT", "HD",
+    ticker_input = st.text_input(
+        "Ticker symbols",
+        value="AAPL, MSFT, NVDA, AVGO, GOOGL, AMZN, META, JPM, V, MA"
+        if market == Market.US
+        else "RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, SBIN, ITC, LT, HINDUNILVR, MARUTI",
+        help=(
+            "Enter Yahoo Finance ticker symbols separated by commas. "
+            "Indian symbols can be entered without the .NS suffix."
+        ),
+    )
+
+    raw_tickers = [
+        ticker.strip()
+        for ticker in ticker_input.split(",")
+        if ticker.strip()
     ]
 
-    selected_tickers = st.multiselect(
-        "Companies to consider",
-        options=available_tickers,
-        default=available_tickers,
-        help="QuantPilot constructs the portfolio using only the companies selected here.",
-    )
+    try:
+        from src.data.markets import normalize_tickers
+
+        selected_tickers = normalize_tickers(
+            raw_tickers,
+            market,
+        )
+    except ValueError as exc:
+        selected_tickers = []
+        st.error(str(exc))
 
     selected_count = len(selected_tickers)
 
@@ -794,111 +730,50 @@ else:
             unsafe_allow_html=True,
         )
 
+    if selected_tickers:
+        st.caption("Normalized symbols: " + ", ".join(selected_tickers))
+
     st.markdown("<br>", unsafe_allow_html=True)
 
     build = st.button(
-        "Build QuantPilot Goal Plan  →",
+        "Build QuantPilot Goal Plan",
         type="primary",
         use_container_width=True,
         disabled=selected_count < 10,
     )
 
     if selected_count >= 10 and build:
-
         try:
-            with st.spinner("Estimating returns, risk and portfolio feasibility..."):
+            with st.spinner(
+                "Loading market data and building the constrained goal portfolio..."
+            ):
+                plan = build_goal_plan_from_selection(
+                    tickers=selected_tickers,
+                    market=market,
+                    target_amount=goal_amount,
+                    years=horizon_years,
+                    risk_tolerance=risk_tolerance.lower(),
+                    max_weight=0.10,
+                    minimum_observations=252,
+                    estimation_window=60,
+                    allow_download=True,
+                )
 
                 asset_data = load_selected_assets(
                     selected_tickers,
-                    available_tickers,
+                    market=market,
+                    allow_download=True,
                 )
 
                 returns = build_selected_return_matrix(asset_data)
-
-                # -------------------------------------------------
-                # Goal Planner validation
-                # -------------------------------------------------
-
-                if goal_amount <= 0:
-                    raise ValueError(
-                        "Target future amount must be greater than zero."
-                    )
-
-                if horizon_years <= 0:
-                    raise ValueError(
-                        "Investment horizon must be greater than zero."
-                    )
-
-                if returns.empty:
-                    raise ValueError(
-                        "No historical return data is available for the selected companies."
-                    )
-
-                if returns.shape[1] < 10:
-                    raise ValueError(
-                        "At least 10 companies with valid historical data are required "
-                        "because the optimizer has a 10% maximum position constraint."
-                    )
-
                 validate_minimum_history(
                     returns,
                     minimum_observations=252,
                 )
 
-                if returns.tail(60).isna().any().any():
-                    raise ValueError(
-                        "The latest estimation window contains missing return observations. "
-                        "Try selecting companies with longer continuous price histories."
-                    )
-
-                estimation_returns = returns.tail(60)
-                daily_expected_returns = estimation_returns.mean()
-
-                expected_returns = (
-                    (1.0 + daily_expected_returns) ** 252 - 1.0
-                )
-
-                if not expected_returns.replace(
-                    [float("inf"), float("-inf")],
-                    pd.NA,
-                ).notna().all():
-                    raise ValueError(
-                        "The return model produced invalid expected-return estimates."
-                    )
-
-                covariance = estimation_returns.cov()
-
-                maximum_return = calculate_maximum_feasible_return(
-                    expected_returns=expected_returns,
-                    covariance=covariance,
-                    risk_tolerance=risk_tolerance.lower(),
-                    max_weight=0.10,
-                )
-
-                if not pd.api.types.is_number(maximum_return):
-                    raise ValueError(
-                        "QuantPilot could not determine a feasible return for "
-                        "the selected universe and risk profile."
-                    )
-
-                recommended_return = calculate_recommended_target_return(
-                    maximum_feasible_return=maximum_return,
-                    risk_tolerance=risk_tolerance.lower(),
-                )
-
-                if recommended_return <= -1.0:
-                    raise ValueError(
-                        "The resulting planning return is not mathematically usable "
-                        "for the selected goal."
-                    )
-
-                portfolio = build_goal_portfolio(
-                    asset_data=asset_data,
-                    target_return=recommended_return,
-                    risk_tolerance=risk_tolerance.lower(),
-                    max_weight=0.10,
-                    estimation_window=60,
-                )
+                portfolio = plan.portfolio
+                recommended_return = plan.recommended_return
+                maximum_return = plan.maximum_feasible_return
 
                 required_initial = calculate_required_initial_investment(
                     future_value=goal_amount,
@@ -912,26 +787,13 @@ else:
                     years=horizon_years,
                 )
 
-                if required_initial < 0 or required_monthly < 0:
-                    raise ValueError(
-                        "QuantPilot produced an invalid funding requirement."
-                    )
+                historical_returns = returns
 
-                if not pd.Series(
-                    [required_initial, required_monthly]
-                ).replace(
-                    [float("inf"), float("-inf")],
-                    pd.NA,
-                ).notna().all():
-                    raise ValueError(
-                        "The funding calculation produced an invalid value. "
-                        "Try a longer investment horizon."
-                    )
-
-                historical_returns = build_selected_return_matrix(asset_data)
-
-                spy_data = load_benchmark("SPY")
-                spy_returns = spy_data["Close"].pct_change().dropna()
+                benchmark_adapter = MarketDataAdapter(market)
+                benchmark_data = benchmark_adapter.load_benchmark(
+                    allow_download=True,
+                )
+                benchmark_returns = benchmark_data["Close"].pct_change().dropna()
 
                 goal_backtest = backtest_goal_portfolio(
                     returns=historical_returns,
@@ -946,7 +808,7 @@ else:
                     {
                         "QuantPilot Goal Portfolio": goal_backtest.returns,
                         "Equal Weight": equal_weight_backtest.returns,
-                        "SPY": spy_returns,
+                        market_config.benchmark: benchmark_returns,
                     },
                     axis=1,
                 ).dropna()
@@ -964,8 +826,8 @@ else:
                 equal_weight_metrics = evaluate_returns(
                     comparison_returns["Equal Weight"]
                 )
-                spy_metrics = evaluate_returns(
-                    comparison_returns["SPY"]
+                benchmark_metrics = evaluate_returns(
+                    comparison_returns[market_config.benchmark]
                 )
 
                 portfolio_volatility = portfolio.expected_volatility
@@ -974,7 +836,6 @@ else:
                     -0.99,
                     recommended_return - portfolio_volatility,
                 )
-
                 optimistic_return = (
                     recommended_return + portfolio_volatility
                 )
@@ -989,93 +850,60 @@ else:
 
             st.success("Goal plan generated successfully.")
 
-            # =================================================
-            # Return & feasibility
-            # =================================================
-
             section(
-                "04 · Return & Feasibility",
+                "05 · Return & Feasibility",
                 "How the selected universe behaves under QuantPilot's constraints",
             )
 
             cols = st.columns(3)
             with cols[0]:
-                card(
-                    "Maximum Feasible Return",
-                    f"{maximum_return:.2%}",
-                    "Optimization ceiling",
-                )
+                card("Maximum Feasible Return", f"{maximum_return:.2%}", "Optimization ceiling")
             with cols[1]:
-                card(
-                    "Recommended Return",
-                    f"{recommended_return:.2%}",
-                    "Risk-profile planning assumption",
-                )
+                card("Recommended Return", f"{recommended_return:.2%}", "Risk-profile planning assumption")
             with cols[2]:
-                card(
-                    "Expected Volatility",
-                    f"{portfolio.expected_volatility:.2%}",
-                    f"{risk_tolerance} profile",
-                )
+                card("Expected Volatility", f"{portfolio.expected_volatility:.2%}", f"{risk_tolerance} profile")
 
             st.markdown(
                 """
                 <div class="qp-highlight">
-                <b>What this means:</b> QuantPilot first estimates the highest
-                return that can satisfy the selected assets, 10% position cap and
-                risk constraint. It then applies the selected risk profile to choose
-                a more conservative planning return. This is a model-based assumption,
-                <b>not a guaranteed future return</b>.
+                QuantPilot first estimates the highest return that can satisfy the
+                selected universe, position cap and risk constraint. It then applies
+                the selected risk profile to choose a more conservative planning return.
+                This is a model-based assumption, not a guaranteed future return.
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-            # =================================================
-            # Required funding
-            # =================================================
-
-            section(
-                "05 · Required Funding",
-                "Two alternative ways to finance the same target",
-            )
+            section("06 · Required Funding", "Alternative ways to finance the same target")
 
             cols = st.columns(2)
             with cols[0]:
                 card(
                     "Invest Upfront",
-                    f"${required_initial:,.0f}",
-                    f"Target: ${goal_amount:,.0f} in {horizon_years} years",
+                    f"{currency_symbol}{required_initial:,.0f}",
+                    f"Target: {currency_symbol}{goal_amount:,.0f} in {horizon_years} years",
                 )
             with cols[1]:
                 card(
                     "Invest Monthly",
-                    f"${required_monthly:,.0f}",
+                    f"{currency_symbol}{required_monthly:,.0f}",
                     f"End-of-month contributions for {horizon_years} years",
                 )
 
             st.markdown(
                 """
                 <div class="qp-highlight">
-                These are <b>alternative funding paths</b>, not amounts that
-                need to be combined. The first assumes the capital is invested
-                upfront; the second assumes regular monthly contributions.
+                These are alternative funding paths. The first assumes capital is
+                invested upfront; the second assumes regular monthly contributions.
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-            # =================================================
-            # Recommended portfolio
-            # =================================================
+            section("07 · Recommended Portfolio", "Model allocation generated from the selected companies")
 
-            section(
-                "06 · Recommended Portfolio",
-                "Model allocation generated from the selected companies and risk constraints",
-            )
-
-            weights = portfolio.weights.copy()
-            weights = weights[weights > 1e-6].sort_values(ascending=False)
+            weights = portfolio.weights[portfolio.weights > 1e-6].sort_values(ascending=False)
 
             allocation = pd.DataFrame(
                 {
@@ -1089,10 +917,7 @@ else:
 
             with left:
                 st.markdown("**Allocation by company**")
-                st.bar_chart(
-                    weights,
-                    height=390,
-                )
+                st.bar_chart(weights, height=390)
 
             with right:
                 st.markdown("**Capital allocation**")
@@ -1100,7 +925,7 @@ else:
                     allocation.style.format(
                         {
                             "Weight": "{:.2%}",
-                            "Initial Allocation": "${:,.0f}",
+                            "Initial Allocation": f"{currency_symbol}" + "{:,.0f}",
                         }
                     ),
                     use_container_width=True,
@@ -1108,21 +933,13 @@ else:
                     height=390,
                 )
 
-            allocation_total = allocation["Initial Allocation"].sum()
-
             st.caption(
                 f"Portfolio weights sum to {weights.sum():.2%}. "
-                f"Displayed initial allocations total approximately ${allocation_total:,.0f}."
+                f"Displayed initial allocations total approximately "
+                f"{currency_symbol}{allocation['Initial Allocation'].sum():,.0f}."
             )
 
-            # =================================================
-            # Scenario analysis
-            # =================================================
-
-            section(
-                "07 · Scenario Analysis",
-                "How the funding requirement changes if the assumed return changes",
-            )
+            section("08 · Scenario Analysis", "How funding requirements change across planning assumptions")
 
             scenario_cols = st.columns(3)
 
@@ -1132,6 +949,7 @@ else:
                     scenarios.conservative.annual_return,
                     scenarios.conservative.initial_investment,
                     scenarios.conservative.monthly_contribution,
+                    currency_symbol,
                 )
 
             with scenario_cols[1]:
@@ -1140,6 +958,7 @@ else:
                     scenarios.expected.annual_return,
                     scenarios.expected.initial_investment,
                     scenarios.expected.monthly_contribution,
+                    currency_symbol,
                 )
 
             with scenario_cols[2]:
@@ -1148,29 +967,24 @@ else:
                     scenarios.optimistic.annual_return,
                     scenarios.optimistic.initial_investment,
                     scenarios.optimistic.monthly_contribution,
+                    currency_symbol,
                 )
 
             st.caption(
-                "Scenario returns are planning assumptions around the recommended "
-                "return. They are not statistical forecasts or guarantees."
+                "Scenario returns are planning assumptions around the recommended return, "
+                "not statistical forecasts or guarantees."
             )
 
-            # =================================================
-            # Historical hypothetical performance
-            # =================================================
-
             section(
-                "08 · Historical Hypothetical Performance",
-                "A historical stress test of the current recommended allocation",
+                "09 · Historical Hypothetical Performance",
+                "Historical stress test of the current recommended allocation",
             )
 
             st.markdown(
                 """
                 <div class="qp-warning">
-                This analysis applies the <b>current recommended portfolio weights</b>
-                to historical data. It is hypothetical and is not a walk-forward
-                simulation of what an investor would actually have held at each point
-                in history.
+                This applies the current recommended portfolio weights to historical data.
+                It is hypothetical and is not a walk-forward simulation.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1206,12 +1020,12 @@ else:
                         f"{equal_weight_metrics['sortino_ratio']:.2f}",
                         f"{equal_weight_metrics['maximum_drawdown']:.2%}",
                     ],
-                    "SPY": [
-                        f"{spy_metrics['cagr']:.2%}",
-                        f"{spy_metrics['annualized_volatility']:.2%}",
-                        f"{spy_metrics['sharpe_ratio']:.2f}",
-                        f"{spy_metrics['sortino_ratio']:.2f}",
-                        f"{spy_metrics['maximum_drawdown']:.2%}",
+                    market_config.benchmark: [
+                        f"{benchmark_metrics['cagr']:.2%}",
+                        f"{benchmark_metrics['annualized_volatility']:.2%}",
+                        f"{benchmark_metrics['sharpe_ratio']:.2f}",
+                        f"{benchmark_metrics['sortino_ratio']:.2f}",
+                        f"{benchmark_metrics['maximum_drawdown']:.2%}",
                     ],
                 }
             )
@@ -1224,32 +1038,27 @@ else:
 
             equity_comparison = (1.0 + comparison_returns).cumprod()
 
-            st.markdown("**Growth of $1**")
+            st.markdown("**Growth of 1 unit**")
             st.line_chart(equity_comparison, height=380)
 
-            drawdown_comparison = (
-                equity_comparison / equity_comparison.cummax()
-            ) - 1.0
-
             st.markdown("**Drawdown**")
-            st.area_chart(drawdown_comparison, height=280)
-
-            # =================================================
-            # Methodology note
-            # =================================================
+            st.area_chart(
+                equity_comparison / equity_comparison.cummax() - 1.0,
+                height=280,
+            )
 
             section("Model Notes")
 
             st.markdown(
-                """
+                f"""
                 <div class="qp-highlight">
+                <b>Market:</b> {market_config.name} ({market_config.currency}).<br>
+                <b>Benchmark:</b> {market_config.benchmark}.<br>
                 <b>Estimation window:</b> latest 60 trading days.<br>
                 <b>Position constraint:</b> maximum 10% per company.<br>
                 <b>Portfolio:</b> long-only and fully invested.<br>
-                <b>Goal return:</b> selected from a feasibility ceiling using the
-                risk-profile rule.<br>
                 <b>Historical comparison:</b> current goal weights versus Equal Weight
-                and SPY on their common historical dates.
+                and the market-specific benchmark.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1259,7 +1068,10 @@ else:
                 "target_amount": goal_amount,
                 "horizon_years": horizon_years,
                 "risk_tolerance": risk_tolerance.lower(),
-                "selected_tickers": selected_tickers,
+                "market": market.value,
+                "currency": market_config.currency,
+                "benchmark": market_config.benchmark,
+                "selected_tickers": list(selected_tickers),
                 "maximum_feasible_return": maximum_return,
                 "recommended_return": recommended_return,
                 "required_initial_investment": required_initial,
@@ -1270,7 +1082,6 @@ else:
 
         except ValueError as exc:
             st.error(f"Goal planning failed: {exc}")
-
         except Exception as exc:
             st.error(
                 "QuantPilot could not build the goal plan. "
@@ -1278,7 +1089,7 @@ else:
             )
 
     st.markdown(
-        '<div class="qp-footer">QuantPilot v2.0 · Goal Planner · '
+        '<div class="qp-footer">QuantPilot · Goal Planner · '
         'Model-based planning only — not financial advice</div>',
         unsafe_allow_html=True,
     )

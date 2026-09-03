@@ -63,6 +63,7 @@ def normalize_ticker(ticker: str, market: Market | str) -> str:
     India:
         RELIANCE -> RELIANCE.NS
         RELIANCE.NS -> RELIANCE.NS
+        ^NSEI -> ^NSEI
     """
     if not isinstance(ticker, str):
         raise TypeError("Ticker must be a string.")
@@ -75,8 +76,14 @@ def normalize_ticker(ticker: str, market: Market | str) -> str:
     config = get_market_config(market)
 
     if config.market is Market.INDIA:
+        # Yahoo Finance index symbols such as ^NSEI
+        # must not receive the .NS equity suffix.
+        if ticker.startswith("^"):
+            return ticker
+
         if ticker.endswith(".NS"):
             return ticker
+
         return f"{ticker}.NS"
 
     return ticker.removesuffix(".US")

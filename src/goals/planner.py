@@ -12,7 +12,9 @@ from src.goals.feasibility import (
 )
 from src.goals.portfolio import GoalPortfolioResult, build_goal_portfolio
 from src.goals.scenarios import ScenarioSet, build_scenario_set
-
+from src.data.market_data import MarketDataAdapter
+from src.data.markets import Market
+from src.goals.assets import load_selected_assets
 
 @dataclass(frozen=True)
 class GoalPlan:
@@ -157,4 +159,46 @@ def build_goal_plan(
         feasibility=feasibility,
         portfolio=portfolio,
         scenarios=scenarios,
+    )
+
+def build_goal_plan_from_selection(
+    tickers: list[str] | tuple[str, ...],
+    market: Market | str,
+    target_amount: float,
+    years: float,
+    risk_tolerance: str,
+    max_weight: float = 0.10,
+    minimum_observations: int = 252,
+    estimation_window: int = 60,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    allow_download: bool = True,
+    data_adapter: MarketDataAdapter | None = None,
+) -> GoalPlan:
+    """
+    Build a complete goal plan from a user-selected market
+    and asset universe.
+
+    This is the V3 market-aware entry point. The underlying
+    goal mathematics and portfolio optimizer remain market-
+    agnostic.
+    """
+
+    asset_data = load_selected_assets(
+        tickers=tickers,
+        market=market,
+        data_adapter=data_adapter,
+        start_date=start_date,
+        end_date=end_date,
+        allow_download=allow_download,
+    )
+
+    return build_goal_plan(
+        asset_data=asset_data,
+        target_amount=target_amount,
+        years=years,
+        risk_tolerance=risk_tolerance,
+        max_weight=max_weight,
+        minimum_observations=minimum_observations,
+        estimation_window=estimation_window,
     )

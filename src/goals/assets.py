@@ -1,4 +1,4 @@
-"""Dynamic asset selection for QuantPilot V2."""
+"""Dynamic, market-aware asset selection for QuantPilot."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from src.data.reader import load_stock
+from src.data.market_data import MarketDataAdapter
+from src.data.markets import Market, normalize_tickers
 
 
 @dataclass(frozen=True)
@@ -17,69 +18,153 @@ class AssetSelection:
 
     def __post_init__(self) -> None:
         if not self.tickers:
-            raise ValueError("At least one ticker must be selected.")
+            raise ValueError(
+                "At least one ticker must be selected."
+            )
 
-        normalized = tuple(ticker.upper().strip() for ticker in self.tickers)
+        normalized = tuple(
+            ticker.upper().strip()
+            for ticker in self.tickers
+        )
 
         if any(not ticker for ticker in normalized):
-            raise ValueError("Ticker symbols cannot be empty.")
+            raise ValueError(
+                "Ticker symbols cannot be empty."
+            )
 
         if len(set(normalized)) != len(normalized):
-            raise ValueError("Duplicate ticker symbols are not allowed.")
+            raise ValueError(
+                "Duplicate ticker symbols are not allowed."
+            )
 
-        object.__setattr__(self, "tickers", normalized)
+        object.__setattr__(
+            self,
+            "tickers",
+            normalized,
+        )
 
 
 def validate_asset_selection(
     tickers: list[str] | tuple[str, ...],
-    available_tickers: list[str] | tuple[str, ...],
+    available_tickers: list[str] | tuple[str, ...] | None = None,
+    *,
+    market: Market | str = Market.US,
+    min_assets: int = 1,
+    max_assets: int = 20,
 ) -> tuple[str, ...]:
-    """Validate and normalize user-selected assets."""
+    """
+    Validate and normalize user-selected assets.
+
+    Backward-compatible behavior:
+        validate_asset_selection(tickers, available_tickers)
+
+    V3 market-aware behavior:
+        validate_asset_selection(
+            tickers,
+            market=Market.INDIA,
+        )
+
+    If ``available_tickers`` is supplied, selected assets must
+    belong to that collection.
+    """
+
+    if min_assets <= 0:
+        raise ValueError(
+            "min_assets must be greater than 0."
+        )
+
+    if max_assets < min_assets:
+        raise ValueError(
+            "max_assets must be greater than or equal to min_assets."
+        )
 
     if not tickers:
-        raise ValueError("At least one ticker must be selected.")
+        raise ValueError(
+            "At least one ticker must be selected."
+        )
 
-    available = {
-        ticker.upper().strip()
-        for ticker in available_tickers
-    }
-
-    selected = tuple(
+    # Check duplicates BEFORE normalize_tickers(), because
+    # normalize_tickers() intentionally deduplicates.
+    raw_selected = tuple(
         ticker.upper().strip()
         for ticker in tickers
     )
 
-    if any(not ticker for ticker in selected):
-        raise ValueError("Ticker symbols cannot be empty.")
-
-    if len(set(selected)) != len(selected):
-        raise ValueError("Duplicate ticker symbols are not allowed.")
-
-    unknown = sorted(set(selected) - available)
-
-    if unknown:
+    if any(not ticker for ticker in raw_selected):
         raise ValueError(
-            f"Unknown ticker(s): {', '.join(unknown)}"
+            "Ticker symbols cannot be empty."
         )
 
-    return selected
+    if len(set(raw_selected)) != len(raw_selected):
+        raise ValueError(
+            "Duplicate ticker symbols are not allowed."
+        )
+
+    normalized = tuple(
+        normalize_tickers(
+            raw_selected,
+            market,
+        )
+    )
+
+    if len(normalized) < min_assets:
+        raise ValueError(
+            f"At least {min_assets} assets must be selected."
+        )
+
+    if len(normalized) > max_assets:
+        raise ValueError(
+            f"No more than {max_assets} assets may be selected."
+        )
+
+    if available_tickers is not None:
+        available = set(
+            normalize_tickers(
+                available_tickers,
+                market,
+            )
+        )
+
+        unknown = sorted(
+            set(normalized) - available
+        )
+
+        if unknown:
+            raise ValueError(
+                f"Unknown ticker(s): {', '.join(unknown)}"
+            )
+
+    return normalized
 
 
 def load_selected_assets(
     tickers: list[str] | tuple[str, ...],
-    available_tickers: list[str] | tuple[str, ...],
+    available_tickers: list[str] | tuple[str, ...] | None = None,
+    *,
+    market: Market | str = Market.US,
+    data_adapter: MarketDataAdapter | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    allow_download: bool = True,
 ) -> dict[str, pd.DataFrame]:
-    """Load processed historical data for the selected assets."""
+    """Load historical data for user-selected assets."""
 
     selected = validate_asset_selection(
         tickers,
         available_tickers,
+        market=market,
     )
 
-    return {
-        ticker: load_stock(ticker)
-        for ticker in selected
-    }
+    adapter = data_adapter or MarketDataAdapter(
+        market=market,
+    )
+
+    return adapter.load_assets(
+        selected,
+        allow_download=allow_download,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
 
 def build_selected_return_matrix(
@@ -94,7 +179,9 @@ def build_selected_return_matrix(
     """
 
     if not asset_data:
-        raise ValueError("asset_data cannot be empty.")
+        raise ValueError(
+            "asset_data cannot be empty."
+        )
 
     if price_column not in {
         column
@@ -112,6 +199,7 @@ def build_selected_return_matrix(
         price_column=price_column,
         method=method,
     )
+
 
 def validate_minimum_history(
     returns: pd.DataFrame,
