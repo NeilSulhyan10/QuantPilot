@@ -102,4 +102,4 @@ def calculate_return_matrix(
             method=method,
         )
 
-    return pd.concat(returns, axis=1).dropna(how="any")
+    return pd.concat(returns, axis=1, sort=False,).dropna(how="any")
