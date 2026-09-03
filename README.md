@@ -913,7 +913,7 @@ before the backtest begins.
 Clone the repository and enter the project directory.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/NeilSulhyan10/QuantPilot
 cd quantpilot
 ```
 
