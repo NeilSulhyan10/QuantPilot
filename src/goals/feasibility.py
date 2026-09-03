@@ -171,3 +171,35 @@ def assess_goal_feasibility(
             profile.max_annual_volatility
         ),
     )
+
+def calculate_recommended_target_return(
+    maximum_feasible_return: float,
+    risk_tolerance: RiskProfile | str,
+) -> float:
+    """Calculate a risk-profile-specific recommended target return.
+
+    The maximum feasible return is treated as the upper boundary.
+    The recommendation uses a fraction of that feasible return:
+
+    Conservative: 50%
+    Moderate:     70%
+    Aggressive:   85%
+
+    This is a planning convention, not a forecast or guarantee.
+    """
+
+    profile = (
+        risk_tolerance
+        if isinstance(risk_tolerance, RiskProfile)
+        else get_risk_profile(risk_tolerance)
+    )
+
+    multipliers = {
+        "conservative": 0.50,
+        "moderate": 0.70,
+        "aggressive": 0.85,
+    }
+
+    multiplier = multipliers[profile.tolerance.value]
+
+    return float(maximum_feasible_return * multiplier)

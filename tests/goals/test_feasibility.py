@@ -4,7 +4,9 @@ import pytest
 from src.goals.feasibility import (
     assess_goal_feasibility,
     calculate_maximum_feasible_return,
+    calculate_recommended_target_return,
 )
+from src.goals.risk_profile import get_risk_profile
 
 
 @pytest.fixture
@@ -168,3 +170,57 @@ def test_mismatched_indices_are_rejected(
             risk_tolerance="moderate",
             max_weight=0.50,
         )
+
+def test_recommended_return_is_below_maximum():
+    maximum = 0.20
+
+    conservative = calculate_recommended_target_return(
+        maximum,
+        "conservative",
+    )
+
+    moderate = calculate_recommended_target_return(
+        maximum,
+        "moderate",
+    )
+
+    aggressive = calculate_recommended_target_return(
+        maximum,
+        "aggressive",
+    )
+
+    assert conservative == pytest.approx(0.10)
+    assert moderate == pytest.approx(0.14)
+    assert aggressive == pytest.approx(0.17)
+
+
+def test_recommended_return_increases_with_risk():
+    maximum = 0.20
+
+    conservative = calculate_recommended_target_return(
+        maximum,
+        "conservative",
+    )
+
+    moderate = calculate_recommended_target_return(
+        maximum,
+        "moderate",
+    )
+
+    aggressive = calculate_recommended_target_return(
+        maximum,
+        "aggressive",
+    )
+
+    assert conservative < moderate < aggressive
+
+
+def test_recommended_return_accepts_risk_profile():
+    profile = get_risk_profile("moderate")
+
+    result = calculate_recommended_target_return(
+        0.20,
+        profile,
+    )
+
+    assert result == pytest.approx(0.14)
