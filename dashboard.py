@@ -3,6 +3,17 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from src.goals.assets import load_selected_assets
+from src.goals.feasibility import (
+    calculate_maximum_feasible_return,
+    calculate_recommended_target_return,
+)
+from src.goals.goal_math import (
+    calculate_required_initial_investment,
+    calculate_required_monthly_contribution,
+)
+from src.goals.portfolio import build_goal_portfolio
+from src.goals.scenarios import build_scenario_set
 
 # =========================================================
 # Paths
@@ -500,35 +511,10 @@ else:
     )
 
     # -----------------------------------------------------
-    # 2. Investment capacity
+    # 2. Risk tolerance
     # -----------------------------------------------------
 
-    st.subheader("2. Investment Capacity")
-
-    initial_investment = st.number_input(
-        "Initial Investment",
-        min_value=0.0,
-        value=100_000.0,
-        step=5_000.0,
-    )
-
-    monthly_contribution = st.number_input(
-        "Monthly Contribution",
-        min_value=0.0,
-        value=2_000.0,
-        step=500.0,
-    )
-
-    if initial_investment == 0 and monthly_contribution == 0:
-        st.warning(
-            "Enter an initial investment or monthly contribution."
-        )
-
-    # -----------------------------------------------------
-    # 3. Risk tolerance
-    # -----------------------------------------------------
-
-    st.subheader("3. Risk Tolerance")
+    st.subheader("2. Risk Tolerance")
 
     risk_tolerance = st.selectbox(
         "How much portfolio risk are you willing to accept?",
@@ -541,109 +527,385 @@ else:
     )
 
     risk_descriptions = {
-        "Conservative": "Lower volatility target.",
-        "Moderate": "Balanced risk and return.",
-        "Aggressive": "Higher volatility tolerance.",
+        "Conservative": (
+            "Lower volatility target with a more defensive portfolio."
+        ),
+        "Moderate": (
+            "Balanced risk and return profile."
+        ),
+        "Aggressive": (
+            "Higher volatility tolerance with greater return potential."
+        ),
     }
 
+    st.caption(risk_descriptions[risk_tolerance])
+
+    # -----------------------------------------------------
+    # 3. Company selection
+    # -----------------------------------------------------
+
+    st.subheader("3. Select Companies")
+
+    available_tickers = [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AVGO",
+        "GOOGL",
+        "AMZN",
+        "META",
+        "JPM",
+        "V",
+        "MA",
+        "JNJ",
+        "UNH",
+        "XOM",
+        "CVX",
+        "PG",
+        "KO",
+        "COST",
+        "CAT",
+        "WMT",
+        "HD",
+    ]
+
+    selected_tickers = st.multiselect(
+        "Companies to consider",
+        options=available_tickers,
+        default=available_tickers,
+        help=(
+            "QuantPilot will construct the portfolio using only "
+            "the companies selected here."
+        ),
+    )
+
     st.caption(
-        risk_descriptions[risk_tolerance]
+        "Select at least 10 companies. The current optimizer "
+        "limits each position to 10%."
     )
 
     # -----------------------------------------------------
-    # 4. Required return
+    # 4. Build goal plan
     # -----------------------------------------------------
 
     st.divider()
 
-    st.subheader("4. Required Return")
+    st.subheader("4. Goal Plan")
 
-    required_return = None
+    if len(selected_tickers) < 10:
+        st.warning(
+            f"Select at least 10 companies. "
+            f"You currently selected {len(selected_tickers)}."
+        )
 
-    if initial_investment > 0 or monthly_contribution > 0:
-        try:
-            required_return = calculate_required_return(
-                future_value=goal_amount,
-                initial_investment=initial_investment,
-                monthly_contribution=monthly_contribution,
-                years=horizon_years,
-            )
-
-            return_col1, return_col2 = st.columns(2)
-
-            return_col1.metric(
-                "Required Annual Return",
-                f"{required_return:.2%}",
-            )
-
-            total_contributions = (
-                initial_investment
-                + monthly_contribution * horizon_years * 12
-            )
-
-            return_col2.metric(
-                "Total Planned Contributions",
-                f"${total_contributions:,.0f}",
-            )
-
-            st.caption(
-                "The required return is the effective annual return "
-                "needed to reach the target under your contribution plan."
-            )
-
-        except ValueError as exc:
-            st.error(str(exc))
-
-    # -----------------------------------------------------
-    # 5. Goal summary
-    # -----------------------------------------------------
-
-    st.divider()
-
-    st.subheader("Goal Summary")
-
-    summary_col1, summary_col2, summary_col3 = st.columns(3)
-
-    summary_col1.metric(
-        "Target Amount",
-        f"${goal_amount:,.0f}",
-    )
-
-    summary_col2.metric(
-        "Horizon",
-        f"{horizon_years} years",
-    )
-
-    summary_col3.metric(
-        "Risk",
-        risk_tolerance,
-    )
-
-    # -----------------------------------------------------
-    # Continue
-    # -----------------------------------------------------
-
-    if st.button(
-        "Check Goal Feasibility",
+    elif st.button(
+        "Build Goal Plan",
         type="primary",
         width="stretch",
     ):
-        if required_return is None:
-            st.error(
-                "Please provide an initial investment "
-                "or monthly contribution."
+
+        try:
+            with st.spinner("Building QuantPilot goal plan..."):
+
+                # ---------------------------------------------
+                # Load selected historical data
+                # ---------------------------------------------
+
+                asset_data = load_selected_assets(
+                    selected_tickers,
+                    available_tickers,
+                )
+
+                # ---------------------------------------------
+                # Build return matrix and estimate the
+                # maximum feasible return under the selected
+                # risk profile and portfolio constraints.
+                # ---------------------------------------------
+
+                from src.goals.assets import (
+                    build_selected_return_matrix,
+                    validate_minimum_history,
+                )
+
+                returns = build_selected_return_matrix(asset_data)
+
+                validate_minimum_history(
+                    returns,
+                    minimum_observations=252,
+                )
+
+                estimation_returns = returns.tail(60)
+
+                daily_expected_returns = estimation_returns.mean()
+
+                expected_returns = (
+                    (1.0 + daily_expected_returns) ** 252 - 1.0
+                )
+
+                covariance = estimation_returns.cov()
+
+                maximum_return = calculate_maximum_feasible_return(
+                    expected_returns=expected_returns,
+                    covariance=covariance,
+                    risk_tolerance=risk_tolerance.lower(),
+                    max_weight=0.10,
+                )
+
+                # ---------------------------------------------
+                # Convert the feasibility ceiling into the
+                # risk-profile-specific planning return.
+                # ---------------------------------------------
+
+                recommended_return = (
+                    calculate_recommended_target_return(
+                        maximum_feasible_return=maximum_return,
+                        risk_tolerance=risk_tolerance.lower(),
+                    )
+                )
+
+                # ---------------------------------------------
+                # Construct the recommended portfolio.
+                # ---------------------------------------------
+
+                portfolio = build_goal_portfolio(
+                    asset_data=asset_data,
+                    target_return=recommended_return,
+                    risk_tolerance=risk_tolerance.lower(),
+                    max_weight=0.10,
+                    estimation_window=60,
+                )
+
+                # ---------------------------------------------
+                # Funding requirements
+                #
+                # These are alternative paths:
+                #   A. fund everything upfront
+                #   B. fund everything monthly
+                # ---------------------------------------------
+
+                required_initial = (
+                    calculate_required_initial_investment(
+                        future_value=goal_amount,
+                        annual_return=recommended_return,
+                        years=horizon_years,
+                    )
+                )
+
+                required_monthly = (
+                    calculate_required_monthly_contribution(
+                        future_value=goal_amount,
+                        annual_return=recommended_return,
+                        years=horizon_years,
+                    )
+                )
+
+                # ---------------------------------------------
+                # Scenario analysis
+                # ---------------------------------------------
+
+                portfolio_volatility = (
+                    portfolio.expected_volatility
+                )
+
+                conservative_return = max(
+                    -0.99,
+                    recommended_return - portfolio_volatility,
+                )
+
+                optimistic_return = (
+                    recommended_return + portfolio_volatility
+                )
+
+                scenarios = build_scenario_set(
+                    target_amount=goal_amount,
+                    years=horizon_years,
+                    conservative_return=conservative_return,
+                    expected_return=recommended_return,
+                    optimistic_return=optimistic_return,
+                )
+
+            st.success("Goal plan generated successfully.")
+
+            # =================================================
+            # Return & feasibility
+            # =================================================
+
+            st.subheader("Return & Feasibility")
+
+            return_col1, return_col2, return_col3 = st.columns(3)
+
+            return_col1.metric(
+                "Maximum Feasible Return",
+                f"{maximum_return:.2%}",
             )
-        else:
-            st.session_state["goal_inputs"] = {
+
+            return_col2.metric(
+                "Recommended Return",
+                f"{recommended_return:.2%}",
+            )
+
+            return_col3.metric(
+                "Expected Volatility",
+                f"{portfolio.expected_volatility:.2%}",
+            )
+
+            st.caption(
+                "The maximum feasible return is an optimization "
+                "ceiling under the selected assets and current "
+                "model constraints. The recommended return is a "
+                "risk-profile-based planning assumption, not a "
+                "guaranteed forecast."
+            )
+
+            # =================================================
+            # Required funding
+            # =================================================
+
+            st.subheader("Required Funding")
+
+            funding_col1, funding_col2 = st.columns(2)
+
+            funding_col1.metric(
+                "Required Initial Investment",
+                f"${required_initial:,.0f}",
+            )
+
+            funding_col2.metric(
+                "Required Monthly Contribution",
+                f"${required_monthly:,.0f}",
+            )
+
+            st.caption(
+                "These are alternative funding paths. You can "
+                "either invest the required amount upfront or "
+                "make the required monthly contribution."
+            )
+
+            # =================================================
+            # Recommended portfolio
+            # =================================================
+
+            st.subheader("Recommended Portfolio")
+
+            weights = portfolio.weights.copy()
+
+            portfolio_table = pd.DataFrame(
+                {
+                    "Ticker": weights.index,
+                    "Weight": weights.values,
+                    "Initial Allocation": (
+                        weights.values * required_initial
+                    ),
+                }
+            )
+
+            portfolio_table = portfolio_table[
+                portfolio_table["Weight"] > 1e-6
+            ].sort_values(
+                "Weight",
+                ascending=False,
+            )
+
+            st.dataframe(
+                portfolio_table.style.format(
+                    {
+                        "Weight": "{:.2%}",
+                        "Initial Allocation": "${:,.0f}",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+            # =================================================
+            # Scenario analysis
+            # =================================================
+
+            st.subheader("Scenario Analysis")
+
+            scenario_rows = [
+                {
+                    "Scenario": scenarios.conservative.name,
+                    "Annual Return": (
+                        scenarios.conservative.annual_return
+                    ),
+                    "Required Initial Investment": (
+                        scenarios.conservative.initial_investment
+                    ),
+                    "Required Monthly Contribution": (
+                        scenarios.conservative.monthly_contribution
+                    ),
+                },
+                {
+                    "Scenario": scenarios.expected.name,
+                    "Annual Return": (
+                        scenarios.expected.annual_return
+                    ),
+                    "Required Initial Investment": (
+                        scenarios.expected.initial_investment
+                    ),
+                    "Required Monthly Contribution": (
+                        scenarios.expected.monthly_contribution
+                    ),
+                },
+                {
+                    "Scenario": scenarios.optimistic.name,
+                    "Annual Return": (
+                        scenarios.optimistic.annual_return
+                    ),
+                    "Required Initial Investment": (
+                        scenarios.optimistic.initial_investment
+                    ),
+                    "Required Monthly Contribution": (
+                        scenarios.optimistic.monthly_contribution
+                    ),
+                },
+            ]
+
+            scenario_table = pd.DataFrame(
+                scenario_rows
+            )
+
+            st.dataframe(
+                scenario_table.style.format(
+                    {
+                        "Annual Return": "{:.2%}",
+                        "Required Initial Investment": "${:,.0f}",
+                        "Required Monthly Contribution": "${:,.0f}",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+            st.caption(
+                "Scenario returns are planning assumptions around "
+                "the recommended return. They are not predictions "
+                "or guarantees."
+            )
+
+            # =================================================
+            # Save planner state
+            # =================================================
+
+            st.session_state["goal_plan"] = {
                 "target_amount": goal_amount,
                 "horizon_years": horizon_years,
-                "initial_investment": initial_investment,
-                "monthly_contribution": monthly_contribution,
-                "required_return": required_return,
                 "risk_tolerance": risk_tolerance.lower(),
+                "selected_tickers": selected_tickers,
+                "maximum_feasible_return": maximum_return,
+                "recommended_return": recommended_return,
+                "required_initial_investment": required_initial,
+                "required_monthly_contribution": required_monthly,
+                "portfolio": portfolio,
+                "scenarios": scenarios,
             }
 
-            st.success(
-                "Required return calculated. "
-                "Asset selection and feasibility analysis are next."
+        except ValueError as exc:
+            st.error(f"Goal planning failed: {exc}")
+
+        except Exception as exc:
+            st.error(
+                "QuantPilot could not build the goal plan. "
+                f"Details: {exc}"
             )
