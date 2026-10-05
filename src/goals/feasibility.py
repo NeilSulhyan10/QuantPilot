@@ -23,6 +23,7 @@ class FeasibilityResult:
     maximum_feasible_return: float
     risk_tolerance: str
     maximum_allowed_volatility: float
+    warning: str | None = None
 
 
 def calculate_maximum_feasible_return(
@@ -159,6 +160,20 @@ def assess_goal_feasibility(
         max_weight=max_weight,
     )
 
+    warning = None
+    if expected_returns.max() < 0:
+        warning = (
+            "All expected returns are negative. The selected universe and "
+            "estimation window imply negative expected returns. Consider "
+            "using a longer estimation window or a different asset universe."
+        )
+    elif expected_returns.mean() < 0:
+        warning = (
+            "Average expected return is negative. The selected universe and "
+            "estimation window imply negative expected returns. Consider "
+            "using a longer estimation window or a different asset universe."
+        )
+
     return FeasibilityResult(
         feasible=(
             target_return
@@ -170,6 +185,7 @@ def assess_goal_feasibility(
         maximum_allowed_volatility=(
             profile.max_annual_volatility
         ),
+        warning=warning,
     )
 
 def calculate_recommended_target_return(
@@ -184,6 +200,10 @@ def calculate_recommended_target_return(
     Conservative: 50%
     Moderate:     70%
     Aggressive:   85%
+
+    When maximum_feasible_return is negative, the recommended return
+    is set equal to the maximum feasible return (acknowledging that
+    the universe cannot achieve positive returns under the risk constraint).
 
     This is a planning convention, not a forecast or guarantee.
     """
@@ -201,5 +221,8 @@ def calculate_recommended_target_return(
     }
 
     multiplier = multipliers[profile.tolerance.value]
+
+    if maximum_feasible_return < 0:
+        return float(maximum_feasible_return)
 
     return float(maximum_feasible_return * multiplier)

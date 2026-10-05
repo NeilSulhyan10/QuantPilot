@@ -34,21 +34,32 @@ def build_goal_portfolio(
     max_weight: float = 0.10,
     minimum_observations: int = 252,
     estimation_window: int = 60,
+    shrinkage_alpha: float = 0.5,
+    skip_feasibility_check: bool = False,
 ) -> GoalPortfolioResult:
     """Construct a portfolio satisfying a return/risk goal.
 
     Expected returns are estimated using the historical mean over
-    the most recent estimation window. Covariance is estimated from
-    the same window.
+    the most recent estimation window with optional cross-sectional
+    shrinkage (matching QuantPilot V2 baseline). Covariance is
+    estimated from the same window.
 
     The historical data is assumed to contain only information
     available before the portfolio decision date.
+
+    If skip_feasibility_check is True, the function will attempt to build
+    the portfolio even if the target return exceeds the maximum feasible
+    return (useful for investment-based planning where we already know
+    the target is feasible under adjusted constraints).
     """
 
     if estimation_window <= 0:
         raise ValueError(
             "estimation_window must be greater than 0."
         )
+
+    if not 0.0 <= shrinkage_alpha <= 1.0:
+        raise ValueError("shrinkage_alpha must be between 0 and 1.")
 
     returns = build_selected_return_matrix(asset_data)
 
@@ -66,6 +77,13 @@ def build_goal_portfolio(
 
     daily_expected_returns = estimation_returns.mean()
 
+    # Apply cross-sectional shrinkage (QuantPilot V2 style)
+    cross_sectional_mean = daily_expected_returns.mean()
+    daily_expected_returns = (
+        cross_sectional_mean
+        + shrinkage_alpha * (daily_expected_returns - cross_sectional_mean)
+    )
+
     # Convert expected daily returns to effective annual returns.
     expected_returns = (
         (1.0 + daily_expected_returns) ** 252 - 1.0
@@ -73,21 +91,24 @@ def build_goal_portfolio(
 
     covariance = estimation_returns.cov()
 
-    feasibility = assess_goal_feasibility(
-        target_return=target_return,
-        expected_returns=expected_returns,
-        covariance=covariance,
-        risk_tolerance=risk_tolerance,
-        max_weight=max_weight,
-    )
-
-    if not feasibility.feasible:
-        raise ValueError(
-            "Goal is infeasible. "
-            f"Target return: {target_return:.2%}; "
-            f"maximum feasible return: "
-            f"{feasibility.maximum_feasible_return:.2%}."
+    if not skip_feasibility_check:
+        feasibility = assess_goal_feasibility(
+            target_return=target_return,
+            expected_returns=expected_returns,
+            covariance=covariance,
+            risk_tolerance=risk_tolerance,
+            max_weight=max_weight,
         )
+
+        if not feasibility.feasible:
+            raise ValueError(
+                "Goal is infeasible. "
+                f"Target return: {target_return:.2%}; "
+                f"maximum feasible return: "
+                f"{feasibility.maximum_feasible_return:.2%}."
+            )
+    else:
+        feasibility = None
 
     optimization = optimize_for_goal(
         expected_returns=expected_returns,

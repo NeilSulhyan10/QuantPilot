@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 
 def calculate_required_cagr(
@@ -182,3 +183,98 @@ def calculate_required_return(
             upper = midpoint
 
     return (lower + upper) / 2.0
+
+
+_HORIZON_PATTERN = re.compile(
+    r"""
+    ^\s*
+    (?:(?P<years>\d+(?:\.\d+)?)\s*(?:y|yr|year|years)\s*)?
+    (?:(?P<months>\d+(?:\.\d+)?)\s*(?:m|mo|month|months)\s*)?
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def parse_horizon(horizon_str: str) -> float:
+    """
+    Parse a horizon string into total years (float).
+
+    Supported formats:
+        - "10" or "10 years" or "10y" -> 10.0
+        - "6 months" or "6m" -> 0.5
+        - "1 year 6 months" or "1y 6m" -> 1.5
+        - "18 months" -> 1.5
+        - "2.5 years" -> 2.5
+
+    Args:
+        horizon_str: String representation of investment horizon.
+
+    Returns:
+        Total years as float.
+
+    Raises:
+        ValueError: If the string cannot be parsed.
+    """
+    if not isinstance(horizon_str, str):
+        raise TypeError("horizon_str must be a string.")
+
+    s = horizon_str.strip()
+    if not s:
+        raise ValueError("Horizon string cannot be empty.")
+
+    # Try parsing as a plain number (assumed to be years)
+    try:
+        val = float(s)
+        if val <= 0:
+            raise ValueError("Horizon must be positive.")
+        return val
+    except ValueError:
+        pass
+
+    # Try parsing structured format
+    match = _HORIZON_PATTERN.match(s)
+    if not match:
+        raise ValueError(
+            f"Invalid horizon format: '{horizon_str}'. "
+            f"Use formats like '10', '10 years', '6 months', '1 year 6 months', '1y 6m'."
+        )
+
+    years = float(match.group("years") or 0)
+    months = float(match.group("months") or 0)
+
+    if years == 0 and months == 0:
+        raise ValueError("Horizon must specify at least one year or month.")
+
+    total_years = years + months / 12.0
+
+    if total_years <= 0:
+        raise ValueError("Horizon must be positive.")
+
+    return total_years
+
+
+def format_horizon(years: float) -> str:
+    """
+    Format years as a human-readable string.
+
+    Args:
+        years: Total years as float.
+
+    Returns:
+        Formatted string like "1 year 6 months" or "10 years".
+    """
+    if years <= 0:
+        return "0"
+
+    total_months = round(years * 12)
+    y = total_months // 12
+    m = total_months % 12
+
+    parts = []
+    if y:
+        parts.append(f"{y} year{'s' if y != 1 else ''}")
+    if m:
+        parts.append(f"{m} month{'s' if m != 1 else ''}")
+
+    return " ".join(parts) if parts else f"{years:.1f} years"

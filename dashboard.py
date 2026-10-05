@@ -16,8 +16,17 @@ from src.goals.feasibility import (
 from src.goals.goal_math import (
     calculate_required_initial_investment,
     calculate_required_monthly_contribution,
+    parse_horizon,
+    format_horizon,
 )
-from src.goals.planner import build_goal_plan_from_selection
+from src.goals.planner import (
+    build_goal_plan_from_selection,
+    evaluate_company_subsets,
+    evaluate_subsets_with_investment,
+    SubsetResult,
+    SubsetInvestmentResult,
+    RiskProfileResult,
+)
 from src.goals.backtest import backtest_goal_portfolio
 from src.backtesting.benchmark import EqualWeightBacktester
 from src.backtesting.config import BacktestConfig
@@ -606,41 +615,18 @@ else:
     st.markdown(
         """
         <div class="qp-hero">
-            <div class="qp-eyebrow">Goal Planner</div>
-            <div class="qp-hero-title">Turn a future target into a portfolio plan.</div>
+            <div class="qp-eyebrow">Portfolio Builder</div>
+            <div class="qp-hero-title">Build your portfolio from an investment amount.</div>
             <div class="qp-hero-copy">
-                Choose a market, select the companies you want QuantPilot to consider,
-                define your target and horizon, and generate a constrained portfolio plan.
-                Market-specific ticker rules and benchmarks are handled automatically.
+                Choose a market, enter your investment amount and horizon, select companies,
+                and QuantPilot finds the top 3 portfolio combinations with risk/return projections.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    section("01 · Define Your Goal", "The destination QuantPilot is planning toward")
-
-    goal_col1, goal_col2 = st.columns(2)
-
-    with goal_col1:
-        goal_amount = st.number_input(
-            "Target Future Amount",
-            min_value=1_000.0,
-            value=1_000_000.0,
-            step=10_000.0,
-            help="The amount you want to reach at the end of the horizon.",
-        )
-
-    with goal_col2:
-        horizon_years = st.number_input(
-            "Investment Horizon (years)",
-            min_value=1,
-            max_value=50,
-            value=10,
-            step=1,
-        )
-
-    section("02 · Choose Market", "Market selection determines ticker conventions, currency and benchmark")
+    section("01 · Choose Market", "Market selection determines ticker conventions, currency and benchmark")
 
     market_label = st.selectbox(
         "Market",
@@ -663,7 +649,72 @@ else:
         unsafe_allow_html=True,
     )
 
-    section("03 · Choose Risk", "Your risk tolerance determines the portfolio volatility constraint")
+    section("02 · Investment Plan", "How much and how long")
+
+    invest_col1, invest_col2 = st.columns(2)
+
+    with invest_col1:
+        investment_mode = st.radio(
+            "Investment type",
+            ["Lump Sum", "Monthly SIP"],
+            horizontal=True,
+            help="Lump Sum: invest all at once. Monthly SIP: invest fixed amount each month.",
+        )
+
+    with invest_col2:
+        if investment_mode == "Lump Sum":
+            investment_amount = st.number_input(
+                f"Initial Investment ({currency_symbol})",
+                min_value=100.0,
+                value=1_000_000.0,
+                step=100.0,
+                help="Amount to invest upfront. Minimum 100.",
+            )
+            monthly_sip = 0.0
+        else:
+            investment_amount = st.number_input(
+                f"Monthly SIP ({currency_symbol})",
+                min_value=100.0,
+                value=10_000.0,
+                step=100.0,
+                help="Amount to invest each month (end of month). Minimum 100.",
+            )
+            monthly_sip = investment_amount
+            investment_amount = 0.0  # No lump sum for SIP mode
+
+    horizon_input = st.text_input(
+        "Investment Horizon",
+        value="10 years",
+        help=(
+            "Examples: '10 years', '5 years 6 months', '18 months', '2.5 years', "
+            "'1y 6m', '6m'. Use years, months, or a combination."
+        ),
+    )
+
+    # Parse horizon immediately for validation feedback
+    try:
+        horizon_years = parse_horizon(horizon_input)
+        st.caption(f"Parsed as: {format_horizon(horizon_years)} ({horizon_years:.2f} years)")
+    except Exception as exc:
+        st.error(str(exc))
+        horizon_years = 0.0
+
+    section("03 · Risk Profiles", "All three profiles will be shown for each portfolio combination")
+
+    risk_descriptions = {
+        "Conservative": "Lower volatility target (max 12% annual vol) — more defensive.",
+        "Moderate": "Balanced risk and return (max 18% annual vol).",
+        "Aggressive": "Higher volatility tolerance (max 25% annual vol) — more return potential.",
+    }
+
+    cols = st.columns(3)
+    for col, (profile, desc) in zip(cols, risk_descriptions.items()):
+        with col:
+            st.markdown(f'<div class="qp-chip">{profile}</div>', unsafe_allow_html=True)
+            st.caption(desc)
+
+    # We'll use all three risk profiles internally
+    risk_tolerance = "moderate"  # default for feasibility calculations
 
     risk_tolerance = st.selectbox(
         "Risk profile",
@@ -684,7 +735,17 @@ else:
         unsafe_allow_html=True,
     )
 
-    section("04 · Select Companies", "Enter the companies you want QuantPilot to consider")
+    section("04 · Estimation Window", "Historical lookback for expected return estimation")
+
+    estimation_window = st.selectbox(
+        "Estimation window",
+        options=[60, 120, 252, 504, 756],
+        index=2,
+        format_func=lambda x: f"{x} days ({'~2 months' if x==60 else '~4 months' if x==120 else '~1 year' if x==252 else '~2 years' if x==504 else '~3 years'})",
+        help="Longer windows provide more stable estimates but may not reflect recent market conditions.",
+    )
+
+    section("05 · Select Companies", "Enter the companies you want QuantPilot to consider")
 
     ticker_input = st.text_input(
         "Ticker symbols",
@@ -693,7 +754,9 @@ else:
         else "RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, SBIN, ITC, LT, HINDUNILVR, MARUTI",
         help=(
             "Enter Yahoo Finance ticker symbols separated by commas. "
-            "Indian symbols can be entered without the .NS suffix."
+            "Indian symbols can be entered without the .NS suffix. "
+            "Minimum 3, maximum 15 companies. "
+            "Position cap auto-relaxes to 1/N per subset."
         ),
     )
 
@@ -716,17 +779,22 @@ else:
 
     selected_count = len(selected_tickers)
 
-    if selected_count < 10:
+    if selected_count < 3:
         st.markdown(
-            f'<div class="qp-warning">Select at least 10 companies. '
-            f'You currently have {selected_count}. The 10% position cap requires '
-            f'at least 10 assets for a fully invested portfolio.</div>',
+            f'<div class="qp-warning">Select at least 3 companies. '
+            f'You currently have {selected_count}.</div>',
+            unsafe_allow_html=True,
+        )
+    elif selected_count > 15:
+        st.markdown(
+            f'<div class="qp-warning">Maximum 15 companies allowed. '
+            f'You have {selected_count}. Please reduce selection.</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
             f'<div class="qp-success">{selected_count} companies selected · '
-            f'10% maximum position constraint satisfied.</div>',
+            f'Subsets of size 3 to {selected_count} will be evaluated.</div>',
             unsafe_allow_html=True,
         )
 
@@ -735,356 +803,328 @@ else:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    section("06 · Ranking Method", "How to rank the top portfolio combinations")
+
+    ranking_metric = st.selectbox(
+        "Rank portfolios by",
+        options=[
+            "Recommended Return",
+            "Expected Return",
+            "Sharpe Ratio",
+            "Max Feasible Return",
+            "Lowest Volatility",
+        ],
+        index=1,
+        help=(
+            "Recommended Return: risk-adjusted target (Conservative=50%, Moderate=70%, Aggressive=85% of max feasible). "
+            "Expected Return: portfolio's estimated annual return. "
+            "Sharpe Ratio: risk-adjusted return (expected_return / volatility). "
+            "Max Feasible Return: highest return achievable under risk constraint. "
+            "Lowest Volatility: minimum risk portfolio."
+        ),
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
     build = st.button(
         "Build QuantPilot Goal Plan",
         type="primary",
         use_container_width=True,
-        disabled=selected_count < 10,
+        disabled=not (3 <= selected_count <= 15) or horizon_years <= 0,
     )
 
-    if selected_count >= 10 and build:
+    if 3 <= selected_count <= 15 and horizon_years > 0 and build:
         try:
             with st.spinner(
-                "Loading market data and building the constrained goal portfolio..."
+                f"Evaluating all company subsets (size 3 to {selected_count})..."
             ):
-                plan = build_goal_plan_from_selection(
-                    tickers=selected_tickers,
+                subset_results = evaluate_subsets_with_investment(
+                    all_tickers=selected_tickers,
                     market=market,
-                    target_amount=goal_amount,
+                    lump_sum=investment_amount,
+                    monthly_sip=monthly_sip,
                     years=horizon_years,
-                    risk_tolerance=risk_tolerance.lower(),
-                    max_weight=0.10,
                     minimum_observations=252,
-                    estimation_window=60,
+                    estimation_window=estimation_window,
+                    shrinkage_alpha=0.5,
                     allow_download=True,
                 )
 
-                asset_data = load_selected_assets(
-                    selected_tickers,
-                    market=market,
-                    allow_download=True,
-                )
+            feasible_results = [r for r in subset_results if r.feasible]
+            infeasible_results = [r for r in subset_results if not r.feasible]
 
-                returns = build_selected_return_matrix(asset_data)
-                validate_minimum_history(
-                    returns,
-                    minimum_observations=252,
-                )
+            top3 = feasible_results[:3]
 
-                portfolio = plan.portfolio
-                recommended_return = plan.recommended_return
-                maximum_return = plan.maximum_feasible_return
+            st.success(
+                f"Evaluated {len(subset_results)} subsets · "
+                f"{len(feasible_results)} feasible · "
+                f"Showing top 3 by projected future value"
+            )
 
-                required_initial = calculate_required_initial_investment(
-                    future_value=goal_amount,
-                    annual_return=recommended_return,
-                    years=horizon_years,
-                )
+            # ---- TOP 3 PORTFOLIOS ----
+            section("04 · Top 3 Portfolio Combinations", "Ranked by best projected future value")
 
-                required_monthly = calculate_required_monthly_contribution(
-                    future_value=goal_amount,
-                    annual_return=recommended_return,
-                    years=horizon_years,
-                )
+            for rank, result in enumerate(top3, 1):
+                # Show all 3 risk profiles in tabs
+                with st.expander(
+                    f"#{rank} · {result.subset_size} companies · "
+                    f"Cap: {result.max_weight:.0%} · "
+                    f"Best FV: {currency_symbol}{result.best_future_value:,.0f}",
+                    expanded=(rank == 1),
+                ):
+                    # Portfolio weights (from moderate profile as reference)
+                    if result.moderate and result.moderate.feasible:
+                        ref_portfolio = result.moderate
+                    elif result.conservative and result.conservative.feasible:
+                        ref_portfolio = result.conservative
+                    else:
+                        ref_portfolio = result.aggressive
 
-                historical_returns = returns
+                    # We need to get the actual portfolio weights - use the first feasible one
+                    # For display, we'll show the moderate profile portfolio
+                    if result.moderate and result.moderate.feasible:
+                        # Need to rebuild portfolio for weights
+                        pass
 
-                benchmark_adapter = MarketDataAdapter(market)
-                benchmark_data = benchmark_adapter.load_benchmark(
-                    allow_download=True,
-                )
-                benchmark_returns = benchmark_data["Close"].pct_change().dropna()
+                    # Risk Profile Comparison Table
+                    st.markdown("**Risk Profile Comparison**")
+                    
+                    risk_data = []
+                    for rp_name, rpr in [("Conservative", result.conservative), 
+                                          ("Moderate", result.moderate), 
+                                          ("Aggressive", result.aggressive)]:
+                        if rpr and rpr.feasible:
+                            fv_lump = rpr.future_value_lump_sum if investment_amount > 0 else 0
+                            fv_sip = rpr.future_value_monthly if monthly_sip > 0 else 0
+                            total_fv = fv_lump + fv_sip
+                            risk_data.append({
+                                "Profile": rp_name,
+                                "Max Vol": f"{rpr.max_allowed_volatility:.1%}",
+                                "Rec. Return": f"{rpr.recommended_return:.2%}",
+                                "Exp. Return": f"{rpr.expected_return:.2%}",
+                                "Exp. Vol": f"{rpr.expected_volatility:.2%}",
+                                "Sharpe": f"{rpr.sharpe_ratio:.2f}",
+                                "Future Value (Lump)": f"{currency_symbol}{fv_lump:,.0f}" if investment_amount > 0 else "—",
+                                "Future Value (SIP)": f"{currency_symbol}{fv_sip:,.0f}" if monthly_sip > 0 else "—",
+                                "Total Future Value": f"{currency_symbol}{total_fv:,.0f}",
+                            })
+                        else:
+                            risk_data.append({
+                                "Profile": rp_name,
+                                "Max Vol": "—",
+                                "Rec. Return": "—",
+                                "Exp. Return": "—",
+                                "Exp. Vol": "—",
+                                "Sharpe": "—",
+                                "Future Value (Lump)": "Infeasible",
+                                "Future Value (SIP)": "Infeasible",
+                                "Total Future Value": "Infeasible",
+                            })
 
-                goal_backtest = backtest_goal_portfolio(
-                    returns=historical_returns,
-                    portfolio=portfolio,
-                )
+                    risk_df = pd.DataFrame(risk_data)
+                    st.dataframe(risk_df, use_container_width=True, hide_index=True)
 
-                equal_weight_backtest = EqualWeightBacktester(
-                    config=BacktestConfig()
-                ).run(returns=historical_returns)
+                    # Allocation for Moderate profile (if feasible)
+                    if result.moderate and result.moderate.feasible:
+                        # Use stored weights from evaluation (avoids rebuild issues)
+                        weights = result.moderate.weights[result.moderate.weights > 1e-6].sort_values(ascending=False)
 
-                comparison_returns = pd.concat(
-                    {
-                        "QuantPilot Goal Portfolio": goal_backtest.returns,
-                        "Equal Weight": equal_weight_backtest.returns,
-                        market_config.benchmark: benchmark_returns,
-                    },
-                    axis=1,
-                ).dropna()
+                        col1, col2 = st.columns([1, 1.5])
+                        with col1:
+                            st.markdown("**Allocation (Moderate Profile)**")
+                            st.bar_chart(weights, height=250)
+                        with col2:
+                            alloc_df = pd.DataFrame({
+                                "Ticker": weights.index,
+                                "Weight": weights.values,
+                                "Amount": weights.values * investment_amount if investment_amount > 0 else weights.values * monthly_sip * 12,
+                            })
+                            st.markdown("**Capital Allocation**")
+                            st.dataframe(
+                                alloc_df.style.format({
+                                    "Weight": "{:.2%}",
+                                    "Amount": f"{currency_symbol}" + "{:,.0f}",
+                                }),
+                                use_container_width=True,
+                                hide_index=True,
+                                height=250,
+                            )
 
-                if len(comparison_returns) < 252:
-                    raise ValueError(
-                        "The common historical evaluation period is shorter than "
-                        "one trading year. QuantPilot requires at least 252 common "
-                        "observations for meaningful performance statistics."
+                    # Warning if any
+                    warnings = []
+                    for rpr in [result.conservative, result.moderate, result.aggressive]:
+                        if rpr and rpr.warning:
+                            warnings.append(f"{rpr.risk_profile}: {rpr.warning}")
+                    for w in warnings:
+                        st.markdown(f'<div class="qp-warning">⚠️ {w}</div>', unsafe_allow_html=True)
+
+            # ---- INFEASIBLE SUBSETS ----
+            if infeasible_results:
+                with st.expander(f"⚠️ {len(infeasible_results)} Infeasible Subsets", expanded=False):
+                    for result in infeasible_results[:20]:
+                        st.markdown(
+                            f"**{' + '.join(result.tickers)}** "
+                            f"({result.subset_size} companies, cap {result.max_weight:.0%}) — "
+                            f"{result.error or 'Infeasible under risk/return constraints'}"
+                        )
+
+            # ---- DETAILED ANALYSIS FOR BEST PORTFOLIO (Moderate) ----
+            if top3:
+                best_result = top3[0]
+                if best_result.moderate and best_result.moderate.feasible:
+                    # Use stored weights from evaluation (avoids rebuild issues)
+                    from src.goals.portfolio import GoalPortfolioResult
+                    from src.goals.assets import load_selected_assets, build_selected_return_matrix, validate_minimum_history
+                    from src.data.markets import normalize_tickers
+
+                    normalized = normalize_tickers(list(best_result.tickers), market)
+                    asset_data = load_selected_assets(
+                        tickers=normalized,
+                        market=market,
+                        allow_download=True,
+                    )
+                    returns = build_selected_return_matrix(asset_data)
+                    validate_minimum_history(returns, minimum_observations=252)
+
+                    # Reconstruct portfolio from stored weights
+                    best_portfolio = GoalPortfolioResult(
+                        weights=best_result.moderate.weights,
+                        expected_return=best_result.moderate.expected_return,
+                        expected_volatility=best_result.moderate.expected_volatility,
+                        target_return=best_result.moderate.recommended_return,
+                        risk_tolerance="moderate",
+                        maximum_allowed_volatility=best_result.moderate.max_allowed_volatility,
+                        feasible=True,
                     )
 
-                goal_metrics = evaluate_returns(
-                    comparison_returns["QuantPilot Goal Portfolio"]
-                )
-                equal_weight_metrics = evaluate_returns(
-                    comparison_returns["Equal Weight"]
-                )
-                benchmark_metrics = evaluate_returns(
-                    comparison_returns[market_config.benchmark]
-                )
+                    benchmark_adapter = MarketDataAdapter(market)
+                    benchmark_data = benchmark_adapter.load_benchmark(allow_download=True)
+                    benchmark_returns = benchmark_data["Close"].pct_change().dropna()
 
-                portfolio_volatility = portfolio.expected_volatility
+                    goal_backtest = backtest_goal_portfolio(
+                        returns=returns,
+                        portfolio=best_portfolio,
+                    )
 
-                conservative_return = max(
-                    -0.99,
-                    recommended_return - portfolio_volatility,
-                )
-                optimistic_return = (
-                    recommended_return + portfolio_volatility
-                )
+                    equal_weight_backtest = EqualWeightBacktester(
+                        config=BacktestConfig()
+                    ).run(returns=returns)
 
-                scenarios = build_scenario_set(
-                    target_amount=goal_amount,
-                    years=horizon_years,
-                    conservative_return=conservative_return,
-                    expected_return=recommended_return,
-                    optimistic_return=optimistic_return,
-                )
-
-            st.success("Goal plan generated successfully.")
-
-            section(
-                "05 · Return & Feasibility",
-                "How the selected universe behaves under QuantPilot's constraints",
-            )
-
-            cols = st.columns(3)
-            with cols[0]:
-                card("Maximum Feasible Return", f"{maximum_return:.2%}", "Optimization ceiling")
-            with cols[1]:
-                card("Recommended Return", f"{recommended_return:.2%}", "Risk-profile planning assumption")
-            with cols[2]:
-                card("Expected Volatility", f"{portfolio.expected_volatility:.2%}", f"{risk_tolerance} profile")
-
-            st.markdown(
-                """
-                <div class="qp-highlight">
-                QuantPilot first estimates the highest return that can satisfy the
-                selected universe, position cap and risk constraint. It then applies
-                the selected risk profile to choose a more conservative planning return.
-                This is a model-based assumption, not a guaranteed future return.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            section("06 · Required Funding", "Alternative ways to finance the same target")
-
-            cols = st.columns(2)
-            with cols[0]:
-                card(
-                    "Invest Upfront",
-                    f"{currency_symbol}{required_initial:,.0f}",
-                    f"Target: {currency_symbol}{goal_amount:,.0f} in {horizon_years} years",
-                )
-            with cols[1]:
-                card(
-                    "Invest Monthly",
-                    f"{currency_symbol}{required_monthly:,.0f}",
-                    f"End-of-month contributions for {horizon_years} years",
-                )
-
-            st.markdown(
-                """
-                <div class="qp-highlight">
-                These are alternative funding paths. The first assumes capital is
-                invested upfront; the second assumes regular monthly contributions.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            section("07 · Recommended Portfolio", "Model allocation generated from the selected companies")
-
-            weights = portfolio.weights[portfolio.weights > 1e-6].sort_values(ascending=False)
-
-            allocation = pd.DataFrame(
-                {
-                    "Ticker": weights.index,
-                    "Weight": weights.values,
-                    "Initial Allocation": weights.values * required_initial,
-                }
-            )
-
-            left, right = st.columns([1.05, 1.35])
-
-            with left:
-                st.markdown("**Allocation by company**")
-                st.bar_chart(weights, height=390)
-
-            with right:
-                st.markdown("**Capital allocation**")
-                st.dataframe(
-                    allocation.style.format(
+                    comparison_returns = pd.concat(
                         {
-                            "Weight": "{:.2%}",
-                            "Initial Allocation": f"{currency_symbol}" + "{:,.0f}",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=390,
-                )
+                            "QuantPilot Portfolio (Moderate)": goal_backtest.returns,
+                            "Equal Weight": equal_weight_backtest.returns,
+                            market_config.benchmark: benchmark_returns,
+                        },
+                        axis=1,
+                    ).dropna()
 
-            st.caption(
-                f"Portfolio weights sum to {weights.sum():.2%}. "
-                f"Displayed initial allocations total approximately "
-                f"{currency_symbol}{allocation['Initial Allocation'].sum():,.0f}."
-            )
+                    if len(comparison_returns) >= 252:
+                        goal_metrics = evaluate_returns(
+                            comparison_returns["QuantPilot Portfolio (Moderate)"]
+                        )
+                        equal_weight_metrics = evaluate_returns(
+                            comparison_returns["Equal Weight"]
+                        )
+                        benchmark_metrics = evaluate_returns(
+                            comparison_returns[market_config.benchmark]
+                        )
 
-            section("08 · Scenario Analysis", "How funding requirements change across planning assumptions")
+                        section("05 · Best Portfolio: Detailed Analysis (Moderate Profile)", "Full analysis of the top-ranked combination")
 
-            scenario_cols = st.columns(3)
+                        cols = st.columns(3)
+                        with cols[0]:
+                            card("Conservative FV", f"{currency_symbol}{best_result.conservative.future_value_lump_sum + best_result.conservative.future_value_monthly:,.0f}" if best_result.conservative else "—", f"Max vol {best_result.conservative.max_allowed_volatility:.0%}")
+                        with cols[1]:
+                            card("Moderate FV", f"{currency_symbol}{best_result.moderate.future_value_lump_sum + best_result.moderate.future_value_monthly:,.0f}" if best_result.moderate else "—", f"Max vol {best_result.moderate.max_allowed_volatility:.0%}")
+                        with cols[2]:
+                            card("Aggressive FV", f"{currency_symbol}{best_result.aggressive.future_value_lump_sum + best_result.aggressive.future_value_monthly:,.0f}" if best_result.aggressive else "—", f"Max vol {best_result.aggressive.max_allowed_volatility:.0%}")
 
-            with scenario_cols[0]:
-                scenario_card(
-                    scenarios.conservative.name,
-                    scenarios.conservative.annual_return,
-                    scenarios.conservative.initial_investment,
-                    scenarios.conservative.monthly_contribution,
-                    currency_symbol,
-                )
+                        if best_result.moderate.warning:
+                            st.markdown(
+                                f"""
+                                <div class="qp-warning">
+                                ⚠️ {best_result.moderate.warning}
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
 
-            with scenario_cols[1]:
-                scenario_card(
-                    scenarios.expected.name,
-                    scenarios.expected.annual_return,
-                    scenarios.expected.initial_investment,
-                    scenarios.expected.monthly_contribution,
-                    currency_symbol,
-                )
+                        section("06 · Historical Performance Comparison", "Backtest vs Equal Weight & Benchmark")
 
-            with scenario_cols[2]:
-                scenario_card(
-                    scenarios.optimistic.name,
-                    scenarios.optimistic.annual_return,
-                    scenarios.optimistic.initial_investment,
-                    scenarios.optimistic.monthly_contribution,
-                    currency_symbol,
-                )
+                        comparison_table = pd.DataFrame(
+                            {
+                                "Metric": [
+                                    "CAGR",
+                                    "Annualized Volatility",
+                                    "Sharpe Ratio",
+                                    "Sortino Ratio",
+                                    "Maximum Drawdown",
+                                ],
+                                "QuantPilot (Moderate)": [
+                                    f"{goal_metrics['cagr']:.2%}",
+                                    f"{goal_metrics['annualized_volatility']:.2%}",
+                                    f"{goal_metrics['sharpe_ratio']:.2f}",
+                                    f"{goal_metrics['sortino_ratio']:.2f}",
+                                    f"{goal_metrics['maximum_drawdown']:.2%}",
+                                ],
+                                "Equal Weight": [
+                                    f"{equal_weight_metrics['cagr']:.2%}",
+                                    f"{equal_weight_metrics['annualized_volatility']:.2%}",
+                                    f"{equal_weight_metrics['sharpe_ratio']:.2f}",
+                                    f"{equal_weight_metrics['sortino_ratio']:.2f}",
+                                    f"{equal_weight_metrics['maximum_drawdown']:.2%}",
+                                ],
+                                market_config.benchmark: [
+                                    f"{benchmark_metrics['cagr']:.2%}",
+                                    f"{benchmark_metrics['annualized_volatility']:.2%}",
+                                    f"{benchmark_metrics['sharpe_ratio']:.2f}",
+                                    f"{benchmark_metrics['sortino_ratio']:.2f}",
+                                    f"{benchmark_metrics['maximum_drawdown']:.2%}",
+                                ],
+                            }
+                        )
 
-            st.caption(
-                "Scenario returns are planning assumptions around the recommended return, "
-                "not statistical forecasts or guarantees."
-            )
+                        st.dataframe(
+                            comparison_table,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
-            section(
-                "09 · Historical Hypothetical Performance",
-                "Historical stress test of the current recommended allocation",
-            )
+                        equity_comparison = (1.0 + comparison_returns).cumprod()
 
-            st.markdown(
-                """
-                <div class="qp-warning">
-                This applies the current recommended portfolio weights to historical data.
-                It is hypothetical and is not a walk-forward simulation.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                        st.markdown("**Growth of 1 unit**")
+                        st.line_chart(equity_comparison, height=380)
 
-            evaluation_start = comparison_returns.index[0]
-            evaluation_end = comparison_returns.index[-1]
+                        st.markdown("**Drawdown**")
+                        st.area_chart(
+                            equity_comparison / equity_comparison.cummax() - 1.0,
+                            height=280,
+                        )
 
-            st.caption(
-                f"Common evaluation period: {evaluation_start.date()} → {evaluation_end.date()}"
-            )
+                        section("Model Notes")
 
-            comparison_table = pd.DataFrame(
-                {
-                    "Metric": [
-                        "CAGR",
-                        "Annualized Volatility",
-                        "Sharpe Ratio",
-                        "Sortino Ratio",
-                        "Maximum Drawdown",
-                    ],
-                    "QuantPilot Goal Portfolio": [
-                        f"{goal_metrics['cagr']:.2%}",
-                        f"{goal_metrics['annualized_volatility']:.2%}",
-                        f"{goal_metrics['sharpe_ratio']:.2f}",
-                        f"{goal_metrics['sortino_ratio']:.2f}",
-                        f"{goal_metrics['maximum_drawdown']:.2%}",
-                    ],
-                    "Equal Weight": [
-                        f"{equal_weight_metrics['cagr']:.2%}",
-                        f"{equal_weight_metrics['annualized_volatility']:.2%}",
-                        f"{equal_weight_metrics['sharpe_ratio']:.2f}",
-                        f"{equal_weight_metrics['sortino_ratio']:.2f}",
-                        f"{equal_weight_metrics['maximum_drawdown']:.2%}",
-                    ],
-                    market_config.benchmark: [
-                        f"{benchmark_metrics['cagr']:.2%}",
-                        f"{benchmark_metrics['annualized_volatility']:.2%}",
-                        f"{benchmark_metrics['sharpe_ratio']:.2f}",
-                        f"{benchmark_metrics['sortino_ratio']:.2f}",
-                        f"{benchmark_metrics['maximum_drawdown']:.2%}",
-                    ],
-                }
-            )
-
-            st.dataframe(
-                comparison_table,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            equity_comparison = (1.0 + comparison_returns).cumprod()
-
-            st.markdown("**Growth of 1 unit**")
-            st.line_chart(equity_comparison, height=380)
-
-            st.markdown("**Drawdown**")
-            st.area_chart(
-                equity_comparison / equity_comparison.cummax() - 1.0,
-                height=280,
-            )
-
-            section("Model Notes")
-
-            st.markdown(
-                f"""
-                <div class="qp-highlight">
-                <b>Market:</b> {market_config.name} ({market_config.currency}).<br>
-                <b>Benchmark:</b> {market_config.benchmark}.<br>
-                <b>Estimation window:</b> latest 60 trading days.<br>
-                <b>Position constraint:</b> maximum 10% per company.<br>
-                <b>Portfolio:</b> long-only and fully invested.<br>
-                <b>Historical comparison:</b> current goal weights versus Equal Weight
-                and the market-specific benchmark.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            st.session_state["goal_plan"] = {
-                "target_amount": goal_amount,
-                "horizon_years": horizon_years,
-                "risk_tolerance": risk_tolerance.lower(),
-                "market": market.value,
-                "currency": market_config.currency,
-                "benchmark": market_config.benchmark,
-                "selected_tickers": list(selected_tickers),
-                "maximum_feasible_return": maximum_return,
-                "recommended_return": recommended_return,
-                "required_initial_investment": required_initial,
-                "required_monthly_contribution": required_monthly,
-                "portfolio": portfolio,
-                "scenarios": scenarios,
-            }
+                        st.markdown(
+                            f"""
+                            <div class="qp-highlight">
+                            <b>Market:</b> {market_config.name} ({market_config.currency}).<br>
+                            <b>Benchmark:</b> {market_config.benchmark}.<br>
+                            <b>Estimation window:</b> latest {estimation_window} trading days.<br>
+                            <b>Position constraint:</b> maximum {best_result.max_weight:.0%} per company (1/N).<br>
+                            <b>Portfolio:</b> long-only and fully invested.<br>
+                            <b>Companies in portfolio:</b> {best_result.subset_size} of {selected_count}.<br>
+                            <b>Historical comparison:</b> best subset vs Equal Weight
+                            and the market-specific benchmark.
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
         except ValueError as exc:
-            st.error(f"Goal planning failed: {exc}")
+            st.error(f"Portfolio building failed: {exc}")
         except Exception as exc:
             st.error(
-                "QuantPilot could not build the goal plan. "
+                "QuantPilot could not build the portfolio. "
                 f"Details: {exc}"
             )
 
