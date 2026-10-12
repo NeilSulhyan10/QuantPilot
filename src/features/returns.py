@@ -28,6 +28,9 @@ def validate_prices(prices: pd.Series) -> None:
     if prices.isna().any():
         raise ValueError("Price series contains missing values.")
 
+    if not np.isfinite(prices.to_numpy(dtype=float)).all():
+        raise ValueError("Price series contains non-finite values.")
+
     if (prices <= 0).any():
         raise ValueError("Price series contains non-positive values.")
 
@@ -102,4 +105,7 @@ def calculate_return_matrix(
             method=method,
         )
 
-    return pd.concat(returns, axis=1, sort=False,).dropna(how="any")
+    matrix = pd.concat(returns, axis=1, sort=False).dropna(how="any")
+    if not np.isfinite(matrix.to_numpy(dtype=float)).all():
+        raise ValueError("Return matrix contains non-finite values.")
+    return matrix

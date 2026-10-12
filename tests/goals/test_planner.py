@@ -80,8 +80,9 @@ def test_build_goal_plan():
 
     assert not plan.portfolio.weights.isna().any()
 
+    total_weight = plan.portfolio.weights.sum() + getattr(plan.portfolio, 'cash_weight', 0.0)
     assert (
-        plan.portfolio.weights.sum()
+        total_weight
         == pytest.approx(1.0, abs=1e-5)
     )
 
@@ -133,7 +134,8 @@ def test_build_goal_plan_from_selection_uses_market_adapter():
     assert plan.years == 10
     assert plan.feasibility.feasible
     assert not plan.portfolio.weights.isna().any()
-    assert plan.portfolio.weights.sum() == pytest.approx(
+    total_weight = plan.portfolio.weights.sum() + getattr(plan.portfolio, 'cash_weight', 0.0)
+    assert total_weight == pytest.approx(
         1.0,
         abs=1e-5,
     )

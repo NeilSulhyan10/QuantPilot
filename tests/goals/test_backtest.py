@@ -85,7 +85,9 @@ def test_goal_portfolio_backtest_has_weights(returns, portfolio):
     )
 
     assert not result.weights.empty
-    assert set(result.weights.columns) == set(portfolio.weights.index)
+    # Weights include CASH now
+    expected_cols = set(portfolio.weights.index) | {"CASH"}
+    assert set(result.weights.columns) == expected_cols
 
 
 def test_goal_portfolio_backtest_has_costs(returns, portfolio):

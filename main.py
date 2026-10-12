@@ -1,442 +1,424 @@
+from contextlib import asynccontextmanager
+import os
 from pathlib import Path
+from typing import Any, Literal
 
-from src.config import load_config
-from src.backtesting.config import BacktestConfig
-from src.backtesting.engine import WalkForwardBacktester
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from src.data.markets import Market, get_market_config, normalize_tickers
+from src.goals.assets import (
+    build_selected_return_matrix,
+    load_selected_assets,
+    validate_minimum_history,
+)
+from src.goals.backtest import backtest_goal_portfolio
+from src.goals.feasibility import (
+    calculate_maximum_feasible_return,
+    calculate_recommended_target_return,
+)
+from src.goals.goal_math import parse_horizon, format_horizon
+from src.goals.planner import (
+    evaluate_subsets_with_investment,
+    SubsetInvestmentResult,
+)
+from src.goals.portfolio import GoalPortfolioResult
+from src.goals.returns import analyze_stock, StockAnalysis, Trend
+from src.goals.scenarios import build_scenario_set
 from src.backtesting.benchmark import EqualWeightBacktester
-from src.backtesting.buy_and_hold import BuyAndHoldBacktester
-from src.data.reader import load_universe
-from src.data.benchmark_reader import load_benchmark
-from src.features.returns import calculate_return_matrix
-from src.features.covariance import rolling_covariance
-from src.models.expected_returns import calculate_expected_returns
-from src.evaluation.benchmark_comparison import (
-    evaluate_strategy_comparison,
+from src.backtesting.config import BacktestConfig
+from src.data.market_data import MarketDataAdapter
+from src.evaluation.metrics import evaluate_returns
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+RESULTS_DIR = PROJECT_ROOT / "results"
+BACKTESTS_DIR = RESULTS_DIR / "backtests"
+COMPARISONS_DIR = RESULTS_DIR / "comparisons"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+
+
+app = FastAPI(
+    title="QuantPilot API",
+    description="Quantitative Portfolio Management API",
+    version="1.0.0",
+    lifespan=lifespan,
 )
-from src.evaluation.portfolio_diagnostics import (
-    portfolio_diagnostics,
+
+local_frontend_origins = [
+    "http://localhost:3000",
+    "http://localhost:3002",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3002",
+]
+deployed_frontend_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[*local_frontend_origins, *deployed_frontend_origins],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-from src.evaluation.plots import (
-    plot_cumulative_returns,
-    plot_drawdowns,
-    plot_portfolio_weights,
-    plot_turnover,
-)
 
-def main() -> None:
-    config = load_config()
 
-    print("=" * 72)
-    print(f"{config.project_name} v{config.project_version}")
-    print("Canonical Portfolio Comparison")
-    print("=" * 72)
+class MarketConfigResponse(BaseModel):
+    market: str
+    name: str
+    currency: str
+    benchmark: str
+    ticker_suffix: str
 
-    # ---------------------------------------------------------
-    # 1. Load universe
-    # ---------------------------------------------------------
 
-    tickers = list(config.universe.tickers)
+class EvaluateRequest(BaseModel):
+    tickers: list[str]
+    market: str = "us"
+    lump_sum: float = 0.0
+    monthly_sip: float = 0.0
+    years: float
+    minimum_observations: int = 252
+    estimation_window: int = 252
+    shrinkage_alpha: float = 0.5
+    min_subset_size: int = 3
+    max_subset_size: int | None = None
+    max_position_weight: float = Field(default=0.25, gt=0, le=1)
+    ranking_metric: Literal["low_risk", "max_future_value"] = "max_future_value"
 
-    stocks = load_universe(tickers)
 
-    print(f"\nUniverse: {len(tickers)} stocks")
+class BacktestRequest(BaseModel):
+    tickers: list[str]
+    market: str = "us"
+    weights: dict[str, float]
+    cash_weight: float = 0.0
+    expected_return: float
+    expected_volatility: float
+    target_return: float
+    risk_tolerance: str
+    maximum_allowed_volatility: float
+    estimation_window: int = 252
+    shrinkage_alpha: float = 0.5
 
-    # ---------------------------------------------------------
-    # 2. Calculate asset returns
-    # ---------------------------------------------------------
 
-    returns = calculate_return_matrix(
-        stocks,
-        method=config.returns.method,
-    )
+class TrendRequest(BaseModel):
+    tickers: list[str]
+    market: str = "us"
 
-    print(
-        f"Return observations: {len(returns)} "
-        f"({returns.index.min().date()} → "
-        f"{returns.index.max().date()})"
-    )
 
-    # ---------------------------------------------------------
-    # 3. QuantPilot expected returns
-    # ---------------------------------------------------------
+def _convert_subset_result(r: SubsetInvestmentResult) -> dict[str, Any]:
+    def _rpr_to_dict(rpr, rp_name: str) -> dict[str, Any] | None:
+        if rpr is None:
+            return None
+        return {
+            "risk_profile": rpr.risk_profile,
+            "max_allowed_volatility": rpr.max_allowed_volatility,
+            "max_feasible_return": rpr.max_feasible_return,
+            "recommended_return": rpr.recommended_return,
+            "expected_return": rpr.expected_return,
+            "expected_volatility": rpr.expected_volatility,
+            "sharpe_ratio": rpr.sharpe_ratio,
+            "future_value_lump_sum": rpr.future_value_lump_sum,
+            "future_value_monthly": rpr.future_value_monthly,
+            "feasible": rpr.feasible,
+            "warning": rpr.warning,
+            "weights": rpr.weights.to_dict() if rpr.weights is not None else None,
+            "cash_weight": rpr.cash_weight,
+        }
 
-    expected_returns = calculate_expected_returns(
-        returns,
-        window=config.expected_returns.window,
-        alpha=config.expected_returns.shrinkage_alpha,
-    )
-
-    expected_returns = expected_returns.dropna(how="any")
-
-    # ---------------------------------------------------------
-    # 4. Rolling covariance
-    # ---------------------------------------------------------
-
-    covariance_matrices = rolling_covariance(
-        returns,
-        window=config.covariance.window,
-    )
-
-    # ---------------------------------------------------------
-    # 5. QuantPilot V2
-    # ---------------------------------------------------------
-
-    backtest_config = BacktestConfig.from_quantpilot_config(
-        config
-    )
-
-    quantpilot = WalkForwardBacktester(
-        config=backtest_config,
-    )
-
-    quantpilot_result = quantpilot.run(
-        returns=returns,
-        expected_returns=expected_returns,
-        covariance_matrices=covariance_matrices,
-    )
-
-    # ---------------------------------------------------------
-    # 6. Equal Weight
-    # ---------------------------------------------------------
-
-    equal_weight = EqualWeightBacktester(
-        config=backtest_config
-    )
-
-    equal_weight_result = equal_weight.run(
-        returns=returns,
-    )
-
-    # ---------------------------------------------------------
-    # 7. Buy & Hold
-    # ---------------------------------------------------------
-
-    buy_and_hold = BuyAndHoldBacktester()
-
-    buy_and_hold_result = buy_and_hold.run(
-        returns=returns,
-    )
-
-    # ---------------------------------------------------------
-    # 8. SPY
-    # ---------------------------------------------------------
-
-    spy_data = load_benchmark(
-        config.benchmarks.market
-    )
-
-    spy_returns = spy_data["Close"].pct_change().dropna()
-
-    # ---------------------------------------------------------
-    # 9. Strategy comparison
-    # ---------------------------------------------------------
-
-    strategy_returns = {
-        "QuantPilot V2": quantpilot_result.returns,
-        "Equal Weight": equal_weight_result.returns,
-        "Buy & Hold": buy_and_hold_result.returns,
-        config.benchmarks.market: spy_returns,
+    return {
+        "tickers": list(r.tickers),
+        "subset_size": r.subset_size,
+        "max_weight": r.max_weight,
+        "feasible": r.feasible,
+        "error": r.error,
+        "conservative": _rpr_to_dict(r.conservative, "conservative"),
+        "moderate": _rpr_to_dict(r.moderate, "moderate"),
+        "aggressive": _rpr_to_dict(r.aggressive, "aggressive"),
+        "best_future_value": r.best_future_value,
+        "extreme_return_warnings": r.extreme_return_warnings,
     }
 
-    comparison = evaluate_strategy_comparison(
-        strategy_returns
-    )
 
-    # ---------------------------------------------------------
-    # 10. Common evaluation period
-    # ---------------------------------------------------------
+def _convert_stock_analysis(a: StockAnalysis) -> dict[str, Any]:
+    return {
+        "ticker": a.ticker,
+        "current_price": a.current_price,
+        "multi_horizon": a.multi_horizon.to_dict(),
+        "trend": a.trend.value,
+        "trend_score": a.trend_score,
+        "technical": a.technical.to_dict(),
+    }
 
-    common_index = strategy_returns[
-        "QuantPilot V2"
-    ].index
 
-    for series in strategy_returns.values():
-        common_index = common_index.intersection(
-            series.index
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "service": "QuantPilot API"}
+
+
+@app.get("/api/markets", response_model=list[MarketConfigResponse])
+async def get_markets():
+    configs = []
+    for m in Market:
+        cfg = get_market_config(m)
+        configs.append(MarketConfigResponse(
+            market=cfg.market.value,
+            name=cfg.name,
+            currency=cfg.currency,
+            benchmark=cfg.benchmark,
+            ticker_suffix=cfg.ticker_suffix,
+        ))
+    return configs
+
+
+@app.post("/api/evaluate")
+async def evaluate_subsets(req: EvaluateRequest):
+    try:
+        market = Market(req.market.lower())
+    except ValueError:
+        raise HTTPException(400, f"Invalid market: {req.market}. Use 'us' or 'india'.")
+
+    try:
+        normalized = normalize_tickers(req.tickers, market)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if len(normalized) < req.min_subset_size:
+        raise HTTPException(400, f"Need at least {req.min_subset_size} tickers, got {len(normalized)}")
+    if len(normalized) > 15:
+        raise HTTPException(400, "Maximum 15 tickers supported")
+    if req.max_subset_size is not None and not req.min_subset_size <= req.max_subset_size <= len(normalized):
+        raise HTTPException(
+            400,
+            f"max_subset_size must be between {req.min_subset_size} and {len(normalized)}",
         )
 
-    common_index = common_index.sort_values()
+    if req.lump_sum <= 0 and req.monthly_sip <= 0:
+        raise HTTPException(400, "At least one of lump_sum or monthly_sip must be positive")
+    if req.years <= 0:
+        raise HTTPException(400, "years must be positive")
 
-    common_start = common_index[0]
-    common_end = common_index[-1]
-
-    # ---------------------------------------------------------
-    # 11. Persist final research outputs
-    # ---------------------------------------------------------
-
-    project_root = Path(__file__).resolve().parent
-
-    results_dir = project_root / "results"
-    backtests_dir = results_dir / "backtests"
-    comparisons_dir = results_dir / "comparisons"
-    figures_dir = results_dir / "figures"
-
-    backtests_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    comparisons_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    figures_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # QuantPilot daily returns
-    quantpilot_result.returns.rename(
-        "return"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_returns.csv",
-        index_label="date",
-    )
-
-    # QuantPilot portfolio weights
-    quantpilot_result.weights.to_csv(
-        backtests_dir / "quantpilot_v2_weights.csv",
-        index_label="date",
-    )
-
-    # Turnover
-    quantpilot_result.turnover.rename(
-        "turnover"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_turnover.csv",
-        index_label="date",
-    )
-
-    # Transaction costs
-    quantpilot_result.transaction_costs.rename(
-        "transaction_cost"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_transaction_costs.csv",
-        index_label="date",
-    )
-
-    # Slippage
-    quantpilot_result.slippage.rename(
-        "slippage"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_slippage.csv",
-        index_label="date",
-    )
-
-    # Strategy comparison table
-    comparison.to_csv(
-        comparisons_dir / "strategy_comparison.csv"
-    )
-
-    plot_cumulative_returns(
-        strategy_returns,
-        figures_dir / "cumulative_returns.png",
-    )
-
-    plot_drawdowns(
-        strategy_returns,
-        figures_dir / "drawdown.png",
-    )
-
-    plot_portfolio_weights(
-        quantpilot_result.weights,
-        figures_dir / "portfolio_weights.png",
-    )
-
-    plot_turnover(
-        quantpilot_result.turnover,
-        figures_dir / "turnover.png",
-    )
-
-    # ---------------------------------------------------------
-    # 12. Portfolio diagnostics
-    # ---------------------------------------------------------
-
-    diagnostics = portfolio_diagnostics(
-        weights=quantpilot_result.weights,
-        turnover=quantpilot_result.turnover,
-        max_weight=config.optimizer.max_weight,
-    )
-
-    # Average weights
-    diagnostics["average_weights"].rename(
-        "average_weight"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_average_weights.csv",
-        index_label="ticker",
-    )
-
-    # Maximum weights
-    diagnostics["maximum_weights"].rename(
-        "maximum_weight"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_maximum_weights.csv",
-        index_label="ticker",
-    )
-
-    # Active positions
-    diagnostics["active_positions"].rename(
-        "active_positions"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_active_positions.csv",
-        index_label="date",
-    )
-
-    # Effective number of stocks
-    diagnostics["effective_number_of_stocks"].rename(
-        "effective_number_of_stocks"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_effective_stocks.csv",
-        index_label="date",
-    )
-
-    # Cap hit frequency
-    diagnostics["cap_hit_frequency"].rename(
-        "cap_hit_frequency"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_cap_hit_frequency.csv",
-        index_label="ticker",
-    )
-
-    # Turnover statistics
-    diagnostics["turnover_statistics"].rename(
-        "value"
-    ).to_csv(
-        backtests_dir / "quantpilot_v2_turnover_statistics.csv",
-        index_label="statistic",
-    )
-
-    # ---------------------------------------------------------
-    # 13. Performance report
-    # ---------------------------------------------------------
-
-    print("\nCommon Evaluation")
-    print("-" * 72)
-
-    print(
-        f"Start: {common_start.date()}"
-    )
-
-    print(
-        f"End:   {common_end.date()}"
-    )
-
-    print("\nPerformance Comparison")
-    print("-" * 72)
-
-    display_columns = [
-        "cumulative_return",
-        "cagr",
-        "annualized_volatility",
-        "sharpe_ratio",
-        "sortino_ratio",
-        "maximum_drawdown",
-    ]
-
-    display = comparison[display_columns].copy()
-
-    display["cumulative_return"] *= 100
-    display["cagr"] *= 100
-    display["annualized_volatility"] *= 100
-    display["maximum_drawdown"] *= 100
-
-    display.columns = [
-        "Cumulative %",
-        "CAGR %",
-        "Volatility %",
-        "Sharpe",
-        "Sortino",
-        "Max Drawdown %",
-    ]
-
-    print(
-        display.to_string(
-            float_format=lambda x: f"{x:.2f}"
+    try:
+        results = evaluate_subsets_with_investment(
+            all_tickers=normalized,
+            market=market,
+            lump_sum=req.lump_sum,
+            monthly_sip=req.monthly_sip,
+            years=req.years,
+            minimum_observations=req.minimum_observations,
+            estimation_window=req.estimation_window,
+            shrinkage_alpha=req.shrinkage_alpha,
+            allow_download=True,
+            min_subset_size=req.min_subset_size,
+            ranking_metric=req.ranking_metric,
+            max_subset_size=req.max_subset_size,
+            max_position_weight=req.max_position_weight,
         )
-    )
+    except Exception as e:
+        raise HTTPException(500, f"Evaluation failed: {str(e)}")
 
-    # ---------------------------------------------------------
-    # 14. QuantPilot trading statistics
-    # ---------------------------------------------------------
+    return [_convert_subset_result(r) for r in results]
 
-    print("\nQuantPilot Trading Statistics")
-    print("-" * 72)
 
-    print(
-        f"Rebalances:              "
-        f"{len(quantpilot_result.turnover)}"
-    )
+@app.post("/api/backtest")
+async def run_backtest(req: BacktestRequest):
+    try:
+        market = Market(req.market.lower())
+    except ValueError:
+        raise HTTPException(400, f"Invalid market: {req.market}")
 
-    print(
-        f"Average turnover:        "
-        f"{quantpilot_result.turnover.mean():.2%}"
-    )
+    try:
+        normalized = normalize_tickers(req.tickers, market)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    print(
-        f"Transaction costs:       "
-        f"{quantpilot_result.transaction_costs.sum():.4f}"
-    )
-
-    print(
-        f"Slippage:                "
-        f"{quantpilot_result.slippage.sum():.4f}"
-    )
-
-    # ---------------------------------------------------------
-    # 15. Portfolio diagnostics report
-    # ---------------------------------------------------------
-
-    print("\nPortfolio Diagnostics")
-    print("-" * 72)
-
-    print(
-        f"Average active positions: "
-        f"{diagnostics['active_positions'].mean():.2f}"
-    )
-
-    print(
-        f"Average effective stocks: "
-        f"{diagnostics['effective_number_of_stocks'].mean():.2f}"
-    )
-
-    print(
-        f"Positions at "
-        f"{config.optimizer.max_weight:.0%} cap: "
-        f"{(diagnostics['cap_hit_frequency'] > 0).sum()}"
-    )
-
-    print("\nTop Average Weights")
-    print("-" * 72)
-
-    print(
-        diagnostics["average_weights"]
-        .head(10)
-        .mul(100)
-        .to_string(
-            float_format=lambda x: f"{x:.2f}%"
+    try:
+        asset_data = load_selected_assets(
+            tickers=normalized,
+            market=market,
+            allow_download=True,
         )
-    )
+        returns = build_selected_return_matrix(asset_data)
+        validate_minimum_history(returns, minimum_observations=252)
 
-    # ---------------------------------------------------------
-    # 16. Saved results
-    # ---------------------------------------------------------
+        portfolio = GoalPortfolioResult(
+            weights=pd.Series(req.weights),
+            expected_return=req.expected_return,
+            expected_volatility=req.expected_volatility,
+            target_return=req.target_return,
+            risk_tolerance=req.risk_tolerance,
+            maximum_allowed_volatility=req.maximum_allowed_volatility,
+            feasible=True,
+            cash_weight=req.cash_weight,
+        )
 
-    print("\nSaved Results")
-    print("-" * 72)
+        goal_backtest = backtest_goal_portfolio(
+            returns=returns,
+            portfolio=portfolio,
+            rebalance_monthly=True,
+        )
 
-    print(
-        f"Backtests:    {backtests_dir}"
-    )
+        comparison_tickers = [str(ticker).upper() for ticker in portfolio.weights.index]
+        equal_weight_backtest = EqualWeightBacktester(config=BacktestConfig()).run(
+            returns=returns.loc[:, comparison_tickers]
+        )
 
-    print(
-        f"Comparisons:  {comparisons_dir}"
-    )
+        adapter = MarketDataAdapter(market)
+        benchmark_data = adapter.load_benchmark(allow_download=True)
+        benchmark_returns = benchmark_data["Close"].pct_change().dropna()
 
-    print(
-        f"Figures:      {figures_dir}"
-    )
+        comparison_returns = pd.concat(
+            {
+                "QuantPilot Portfolio": goal_backtest.returns,
+                "Equal Weight": equal_weight_backtest.returns,
+                "Benchmark": benchmark_returns,
+            },
+            axis=1,
+        ).dropna()
+
+        metrics = {}
+        if len(comparison_returns) >= 30:
+            metrics["QuantPilot Portfolio"] = evaluate_returns(comparison_returns["QuantPilot Portfolio"])
+            metrics["Equal Weight"] = evaluate_returns(comparison_returns["Equal Weight"])
+            metrics["Benchmark"] = evaluate_returns(comparison_returns["Benchmark"])
+
+        equity = (1.0 + comparison_returns).cumprod()
+        equity_curve = equity.copy()
+        equity_curve.insert(
+            0,
+            "date",
+            [pd.Timestamp(date).isoformat() for date in equity_curve.index],
+        )
+
+        return {
+            "goal_returns": goal_backtest.returns.to_dict(),
+            "goal_weights": goal_backtest.weights.to_dict(orient="records"),
+            "equal_weight_returns": equal_weight_backtest.returns.to_dict(),
+            "benchmark_returns": benchmark_returns.to_dict(),
+            "comparison_returns": comparison_returns.to_dict(orient="records"),
+            "equity_curve": equity_curve.to_dict(orient="records"),
+            "metrics": metrics,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Backtest failed: {str(e)}")
+
+
+@app.post("/api/trend")
+async def analyze_trends(req: TrendRequest):
+    try:
+        market = Market(req.market.lower())
+    except ValueError:
+        raise HTTPException(400, f"Invalid market: {req.market}")
+
+    try:
+        normalized = normalize_tickers(req.tickers, market)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    adapter = MarketDataAdapter(market)
+    results = []
+
+    for ticker in normalized:
+        try:
+            data = adapter.load_asset(ticker, allow_download=True)
+            prices = data["Close"].dropna()
+            if len(prices) >= 2:
+                analysis = analyze_stock(prices, ticker)
+                results.append(_convert_stock_analysis(analysis))
+            else:
+                results.append({"ticker": ticker, "error": "Insufficient price data"})
+        except Exception as e:
+            results.append({"ticker": ticker, "error": str(e)})
+
+    return results
+
+
+def _get_portfolio_builder_path(data_dir: Path, filename: str, market: str) -> Path:
+    """Get the path for portfolio builder data files, with market-specific naming."""
+    # Try market-specific file first
+    if market.lower() != "us":
+        market_path = data_dir / f"quantpilot_v2_{filename}_{market}.csv"
+        if market_path.exists():
+            return market_path
+    # Fallback to generic (US) file - try with and without quantpilot_v2_ prefix
+    path_with_prefix = data_dir / f"quantpilot_v2_{filename}.csv"
+    if path_with_prefix.exists():
+        return path_with_prefix
+    # Fallback to just the filename
+    return data_dir / f"{filename}.csv"
+
+
+@app.get("/api/portfolio-builder/comparison")
+async def get_comparison(market: str = Query("us")):
+    path = _get_portfolio_builder_path(COMPARISONS_DIR, "strategy_comparison", market)
+    if not path.exists():
+        raise HTTPException(404, f"Comparison data not found for market: {market}")
+    df = pd.read_csv(path, index_col="strategy")
+    return df.to_dict(orient="index")
+
+
+@app.get("/api/portfolio-builder/returns")
+async def get_returns(market: str = Query("us")):
+    path = _get_portfolio_builder_path(BACKTESTS_DIR, "returns", market)
+    if not path.exists():
+        raise HTTPException(404, f"Returns data not found for market: {market}")
+    df = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+    return df.reset_index().to_dict(orient="records")
+
+
+@app.get("/api/portfolio-builder/weights")
+async def get_weights(market: str = Query("us")):
+    path = _get_portfolio_builder_path(BACKTESTS_DIR, "weights", market)
+    if not path.exists():
+        raise HTTPException(404, f"Weights data not found for market: {market}")
+    df = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+    return df.reset_index().to_dict(orient="records")
+
+
+@app.get("/api/portfolio-builder/turnover")
+async def get_turnover(market: str = Query("us")):
+    path = _get_portfolio_builder_path(BACKTESTS_DIR, "turnover", market)
+    if not path.exists():
+        raise HTTPException(404, f"Turnover data not found for market: {market}")
+    df = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+    return df.reset_index().to_dict(orient="records")
+
+
+@app.get("/api/portfolio-builder/average-weights")
+async def get_average_weights(market: str = Query("us")):
+    path = _get_portfolio_builder_path(BACKTESTS_DIR, "average_weights", market)
+    if not path.exists():
+        raise HTTPException(404, f"Average weights data not found for market: {market}")
+    df = pd.read_csv(path, index_col="ticker")
+    return df.to_dict(orient="index")
+
+
+@app.get("/api/portfolio-builder/effective-stocks")
+async def get_effective_stocks(market: str = Query("us")):
+    path = _get_portfolio_builder_path(BACKTESTS_DIR, "effective_stocks", market)
+    if not path.exists():
+        raise HTTPException(404, f"Effective stocks data not found for market: {market}")
+    df = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+    return df.reset_index().to_dict(orient="records")
+
+
+@app.get("/api/parse-horizon")
+async def parse_horizon_endpoint(horizon: str = Query(...)):
+    try:
+        years = parse_horizon(horizon)
+        formatted = format_horizon(years)
+        return {"years": years, "formatted": formatted}
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

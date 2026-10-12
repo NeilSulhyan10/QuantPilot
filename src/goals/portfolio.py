@@ -11,7 +11,10 @@ from src.goals.assets import (
     validate_minimum_history,
 )
 from src.goals.feasibility import assess_goal_feasibility
-from src.goals.optimizer import optimize_for_goal
+from src.goals.optimizer import (
+    optimize_for_goal,
+    optimize_for_goal_with_cash,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,7 @@ class GoalPortfolioResult:
     risk_tolerance: str
     maximum_allowed_volatility: float
     feasible: bool
+    cash_weight: float = 0.0
 
 
 def build_goal_portfolio(
@@ -36,6 +40,9 @@ def build_goal_portfolio(
     estimation_window: int = 60,
     shrinkage_alpha: float = 0.5,
     skip_feasibility_check: bool = False,
+    use_cash: bool = False,
+    risk_free_rate: float = 0.045,
+    max_cash_weight: float = 1.0,
 ) -> GoalPortfolioResult:
     """Construct a portfolio satisfying a return/risk goal.
 
@@ -51,6 +58,9 @@ def build_goal_portfolio(
     the portfolio even if the target return exceeds the maximum feasible
     return (useful for investment-based planning where we already know
     the target is feasible under adjusted constraints).
+
+    If use_cash is True, adds a risk-free cash asset with configurable
+    risk-free rate and maximum cash weight.
     """
 
     if estimation_window <= 0:
@@ -110,13 +120,24 @@ def build_goal_portfolio(
     else:
         feasibility = None
 
-    optimization = optimize_for_goal(
-        expected_returns=expected_returns,
-        covariance=covariance,
-        target_return=target_return,
-        risk_tolerance=risk_tolerance,
-        max_weight=max_weight,
-    )
+    if use_cash:
+        optimization = optimize_for_goal_with_cash(
+            expected_returns=expected_returns,
+            covariance=covariance,
+            target_return=target_return,
+            risk_tolerance=risk_tolerance,
+            max_weight=max_weight,
+            risk_free_rate=risk_free_rate,
+            max_cash_weight=max_cash_weight,
+        )
+    else:
+        optimization = optimize_for_goal(
+            expected_returns=expected_returns,
+            covariance=covariance,
+            target_return=target_return,
+            risk_tolerance=risk_tolerance,
+            max_weight=max_weight,
+        )
 
     return GoalPortfolioResult(
         weights=optimization.weights,
@@ -128,4 +149,5 @@ def build_goal_portfolio(
             optimization.maximum_allowed_volatility
         ),
         feasible=True,
+        cash_weight=optimization.cash_weight,
     )

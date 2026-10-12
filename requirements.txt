@@ -10,4 +10,6 @@ yfinance
 pyyaml
 pyarrow
 pytest
-streamlit
+fastapi
+uvicorn
+pydantic

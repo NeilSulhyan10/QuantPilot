@@ -82,21 +82,95 @@ The project emphasizes realistic research methodology and attempts to avoid:
              +----------------+----------------+
                               |
                               v
-                         Net Returns
-                              |
-                              v
-                    Performance Evaluation
-                              |
-          +-------------------+-------------------+
-          |                   |                   |
-          v                   v                   v
-      Benchmarks         Diagnostics         Visualizations
-          |                                       |
-          +-------------------+-------------------+
-                              |
-                              v
-                       Streamlit Dashboard
+Net Returns
+                               |
+                               v
+                        Performance Evaluation
+                               |
+           +-------------------+-------------------+
+           |                   |                   |
+           v                   v                   v
+       Benchmarks         Diagnostics         Visualizations
+           |                                       |
+           +-------------------+-------------------+
+                               |
+                               v
+                        FastAPI Backend (Port 8000)
+                               |
+                               v
+                        Next.js Frontend (Port 3000)
 ```
+
+---
+
+## 2.5. Frontend Architecture (Next.js)
+
+The dashboard has been migrated from Streamlit to a modern **Next.js 16** frontend with **React 19**, providing a professional financial analytics interface.
+
+### Technology Stack
+- **Framework**: Next.js 16 (App Router) with React 19
+- **Styling**: Tailwind CSS 3 via PostCSS, custom design system matching original Streamlit theme
+- **Charts**: Recharts for interactive financial visualizations
+- **Language**: TypeScript with strict mode
+- **State Management**: React hooks (useState, useEffect) with typed API client
+
+### Project Structure
+```
+frontend/
+├── src/
+│   ├── app/
+│   │   ├── page.tsx                    # Landing page with mode selector
+│   │   ├── portfolio-builder/page.tsx  # Portfolio Analytics (pre-computed CSVs)
+│   │   ├── research-lab/page.tsx       # Research Lab (live evaluation)
+│   │   ├── layout.tsx                  # Root layout with Google Fonts
+│   │   └── globals.css                 # Tailwind + custom design system
+│   ├── components/
+│   │   ├── ui/                         # Reusable components (Card, Button, Table, etc.)
+│   │   ├── portfolio-builder/          # Mode-specific components
+│   │   └── research-lab/               # Mode-specific components
+│   └── lib/
+│       ├── api.ts                      # Typed API client with fetch wrappers
+│       ├── types.ts                    # TypeScript interfaces matching Python dataclasses
+│       ├── formatters.ts               # Financial formatting utilities
+│       └── utils.ts                    # clsx utility for class names
+```
+
+### Design System
+The frontend replicates the original Streamlit dashboard's visual identity:
+- **Typography**: Space Grotesk (headings) + DM Sans (body)
+- **Colors**: Blue primary (#2563eb), slate grays, semantic colors (green/amber/red)
+- **Components**: Cards with subtle shadows, bordered tables, chip badges, hero sections
+- **Charts**: White backgrounds, slate axes, blue accents, no wheel zoom
+
+### Pages
+
+#### Portfolio Analytics (`/portfolio-builder`)
+Displays pre-computed backtest results from CSV files:
+- 5 metric cards (CAGR, Sharpe, Volatility, Max Drawdown, Cumulative Return)
+- Strategy comparison table with formatting
+- Cumulative growth & drawdown charts (Recharts LineChart/AreaChart)
+- Latest & average portfolio weights tables
+- Portfolio characteristics cards
+- Turnover chart
+- Methodology & limitations documentation
+
+#### Research Lab (`/research-lab`)
+Interactive portfolio construction workflow:
+1. **Market Selection** - US/India with currency/benchmark chips
+2. **Investment Plan** - Lump Sum or Monthly SIP + horizon parser
+3. **Risk Profiles** - Conservative/Moderate/Aggressive with vol targets
+4. **Estimation Window** - 60-756 day lookback selector
+5. **Company Selection** - Ticker input with normalization + validation
+6. **Ranking Method** - 6 sorting options
+7. **Live Evaluation** - Subset evaluation with 3 risk profiles each
+8. **Results** - Risk profile tables, allocation charts, trend analysis
+9. **Backtest** - Historical comparison vs Equal Weight & benchmark
+
+### API Integration
+The frontend communicates with the FastAPI backend via a typed client (`src/lib/api.ts`):
+- Environment variable `NEXT_PUBLIC_API_BASE_URL` (default: `http://localhost:8000`)
+- Fully typed endpoints matching Python dataclasses
+- Automatic CORS handling (configured in FastAPI)
 
 ---
 
@@ -929,10 +1003,17 @@ Activate it:
 source .venv/bin/activate
 ```
 
-Install dependencies:
+Install Python dependencies:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Install Node.js dependencies (for frontend):
+
+```bash
+cd frontend
+npm install
 ```
 
 ---
@@ -992,24 +1073,41 @@ End:   2026-08-27
 
 ---
 
-## 34. Running the Dashboard
+## 34. Running the Application
 
-The project includes a Streamlit dashboard.
+The project includes a **FastAPI backend** and a **Next.js frontend**.
 
-Run:
+### Option 1: Run Both (Recommended)
+
+**Terminal 1 - Backend:**
+```bash
+python main.py
+```
+Backend runs on `http://localhost:8000` with API docs at `http://localhost:8000/docs`
+
+**Terminal 2 - Frontend:**
+```bash
+cd frontend
+npm run dev
+```
+Frontend runs on `http://localhost:3000`
+
+### Option 2: Backend Only (API)
+
+```bash
+python main.py
+```
+Access API docs at `http://localhost:8000/docs` for interactive testing.
+
+### Legacy Streamlit Dashboard (Deprecated)
+
+The original Streamlit dashboard is still available but deprecated:
 
 ```bash
 streamlit run dashboard.py
 ```
 
-The dashboard reads persisted research results rather than rerunning the
-entire backtest.
-
-This separates:
-
-```text
-Research computation
-```
+The Next.js frontend provides the same functionality with a modern React interface, better performance, and improved UX.
 
 from:
 
